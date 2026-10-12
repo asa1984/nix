@@ -271,6 +271,25 @@ C++ Nix 側の CA 安定化マイルストーン（#35）は 71%、dynamic deriv
 - **正確な GC を基本とする**（世代別で、アリーナ割り当て）。C++ Nix の Boehm GC は保守的なうえ、tagged pointer のために変位登録を広げており、偽の参照による保持を招きやすい（`eval-gc.cc:53,70-73`）。
 - **失敗値は軽量にする。** C++ Nix は失敗した thunk ごとに finalizer を持つ例外を保持している（`value.hh:441-475`）。エラートレースは遅延して整形する。
 - **ヒープの初期サイズと上限は設定で変えられるようにする。**
+- **一意性による in-place 更新**（Perceus の reuse の考え方を部分的に取り入れる）：
+  - オブジェクトに「参照が1本だけ」を示す一意性ビットを持たせる。共有された時点（thunk に捕まった、別の変数に束縛されたなど）で印を落とす。
+  - `++`、`//`、`listToAttrs`、`mapAttrs` などの primop は、引数が一意なら破壊的に更新する。
+  - バイトコードのコンパイル時に、`foldl'` のアキュムレータのように明らかに一意な経路を見つけ、専用の命令を出す。
+  - これで `foldl' (acc: x: acc ++ [x])` や `foldl' (acc: x: acc // {…})` の O(n²) を償却 O(1) にできる。C++ Nix では毎回コピーしている（`eval.cc:2104-2134`）。
+  - 先行事例：Lean 4 の `Array`（参照カウントが 1 なら破壊的に更新する）。
+
+##### 検討して採用しなかった方式：Perceus（参照カウント）を主たるメモリ管理にする
+
+Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 4 も近い方式）は、コンパイラが参照カウントの増減命令（dup/drop）を正確な位置に挿入する方式。最後の使用の直後に解放され、参照カウントが 1 のオブジェクトはその場で再利用できる。前提は、正格評価であること、データが不変であること、循環参照がほぼ生じないこと。Nix の評価器はこの前提を満たさないため、主たるメモリ管理としては採用しない。
+
+| 理由 | 内容 |
+|---|---|
+| 循環参照が構造的に、大量に生じる | Nix の `let` はすべて再帰的で、評価するたびに「Env → thunk → 同じ Env」の循環ができる（C++ Nix の `eval.cc:1398-1408`）。thunk を評価した後も、結果がクロージャなら循環は残る（再帰関数はすべてこの形）。`rec { }`、固定点（`lib.fix`、`pkgs = f pkgs`、overlay の `final: prev:`）、`derivation` の出力同士の相互参照も同じ。参照カウントは循環を回収できず、循環回収器を足せば結局トレース型 GC を併用することになる |
+| 遅延評価で thunk を書き換える | Perceus の解析は、値が不変で最後の使用がコンパイル時に決まることを前提にしている。thunk は作られた後で結果に書き換えられ、どこから参照され続けるかは実行時にしか決まらない。dup/drop を省く最適化や借用がほとんど効かず、素朴な参照カウントになってしまう |
+| 並列評価と相性が悪い | スレッドをまたいで共有されるオブジェクトの参照カウントにはアトミック操作が必要。並列評価では nixpkgs のグラフがほぼ丸ごと共有されるので、参照をコピーするたびにアトミック操作が走る |
+| 評価器の使われ方と合いにくい | 評価はバッチ処理で、`pkgs` 経由で多くの値が最後まで生き続ける。重要なのはすぐに解放することより確保の速さで、大量に出る短命なゴミ（thunk、Env）は、世代別 GC の nursery が最も安く処理できる。同じく遅延評価の関数型言語である GHC も、トレース型の世代別 GC を採用している |
+
+結論として、確保の速さと短命オブジェクトの処理は世代別のトレース型 GC に任せる。Perceus からは、上の「一意性による in-place 更新」だけを取り入れる。
 
 #### 6.1.5 derivation の生成（`derivationStrict` 相当）
 - **drv はいったんメモリ上の drv グラフに追加するだけにする。**
@@ -590,6 +609,10 @@ C++ Nix 側の CA 安定化マイルストーン（#35）は 71%、dynamic deriv
 - [dynamic-derivations stabilisation（milestone #39）](https://github.com/NixOS/nix/milestone/39)
 - [Tracking issue for RFC 92: Dynamic derivations（#6316）](https://github.com/NixOS/nix/issues/6316)
 - [Reworking the goals（#12628）](https://github.com/NixOS/nix/issues/12628)
+
+### メモリ管理の文献
+- Reinking, Xie, de Moura, Leijen. [Perceus: Garbage Free Reference Counting with Reuse](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/)（PLDI 2021）
+- Ullrich, de Moura. [Counting Immutable Beans: Reference Counting Optimized for Purely Functional Programming](https://arxiv.org/abs/1908.05647)（IFL 2019。Lean 4 の参照カウントと破壊的更新）
 
 ### 関連プロジェクト
 - [snix](https://git.snix.dev/snix/snix) / [Announcing Snix](https://snix.dev/blog/announcing-snix/)
