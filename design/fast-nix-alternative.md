@@ -123,9 +123,17 @@ C++ Nix 側の CA 安定化マイルストーン（#35）は 71%、dynamic deriv
 - **corepkgs**：stdenv の bootstrap が `import <nix/fetchurl.nix>` を使う。`builtin:fetchurl` builder も含めて実装が必要。
 - **string context**：`inputDrvs` と `inputSrcs` を決める。`unsafeDiscardStringContext`、`unsafeDiscardOutputDependency`、`appendContext`、`getContext` を含めて完全に同じ意味にする。
 - **`derivationStrict` の細部**：`__structuredAttrs`、`__json`、`outputHashMode` / `outputHashAlgo` の組み合わせ、`allowedReferences` 系、`__impureHostDeps`、`requiredSystemFeatures`、`passAsFile`、`exportReferencesGraph`、`__contentAddressed`、`__impure`。
-- **値の文字列化**：float の出力形式（`toString`、`toJSON`）、整数のオーバーフロー時の挙動、`toXML`。
-- **順序**：`attrNames` と `attrValues` は名前の辞書順、`sort` は安定ソート、`toJSON` のキー順。
-- **正規表現**：`match` と `split` は POSIX extended の方言。
+- **値の文字列化**：float の出力形式（`toString`、`toJSON`）、整数のオーバーフロー時の挙動（64 ビット符号付き、オーバーフローはエラー）、`toXML`。
+- **derivation の env への変換（`coerceToString` の癖）**：
+  - `true` は `"1"`、`false` と `null` は `""`。
+  - **float は `std::to_string`（`%f`、小数点以下6桁固定）**。
+  - リストは空白区切りで連結するが、空のネストリストの後には空白を入れない（`eval.cc:2590-2629`、`/* !!! not quite correct */`）。
+  - `__structuredAttrs` の JSON は、nlohmann/json のキー順、float 表記、エスケープ規則で出力される（`parsed-derivations.cc:58`）。
+- **順序**：`attrNames` と `attrValues` は名前のバイト単位の辞書順、`sort` は安定ソート、`toJSON` のキー順。
+  - **attrset の内部順序は自由に決めてよい。** 2022 年（`8775be339`）より前の C++ Nix は、シンボルを文字列のアドレスで比較していた。つまり内部順序は malloc 次第で、意味を持ったことがない。
+- **正規表現**：`match` と `split` は libstdc++ の `std::regex`（POSIX extended）の挙動に、バグまで含めて合わせる。C++ Nix 自身が boost::regex に移行しようとしたが、方言の違い（`"\\{}"`）が原因で revert している（`908a011a4`）。
+- **masked hash の衝突時の挙動**：2026-08 の `b26204ba1`（#16317）で、ハッシュが衝突した入力 drv の出力集合をマージするよう変わり、該当する drv の store path が変わった。どの Nix バージョンの挙動に合わせるかを決める（§11 Q11）。
+- **`//` の評価順序**：連鎖した `a // b // c` は右辺から強制される（`eval.cc:2081-2087`）。影響するのは、どのエラーが報告されるかだけ。
 - **パーサ**：`fromTOML`、`fromJSON` の境界的な挙動（重複キー、大きな数値）。
 - **パスの扱い**：パス値の正規化、`baseNameOf`、`dirOf`、パスから文字列への変換時に store にコピーされるタイミング。
 - **ハッシュと名前**：`hashString`、`hashFile`、`convertHash`、store path の name の検証規則。
@@ -203,11 +211,41 @@ C++ Nix 側の CA 安定化マイルストーン（#35）は 71%、dynamic deriv
 
 #### 6.1.1 実行モデル
 - **コンパイルの流れ**：パース → 静的スコープ解決 → バイトコード → VM。
-  - `with` は「動的な lookup が必要な変数」として、コンパイル時に区別しておく。そのうえで、`with` の対象の attrset とその lookup 結果を各スコープでキャッシュする。C++ Nix では毎回 `forceAttrs` と二分探索をしている（`eval.cc:941-963`）。
-- **パース結果のキャッシュ**：ファイルの内容ハッシュをキーにして、バイトコードをディスクにキャッシュできる構造にする（任意。§11 Q4）。
+  - `with` は「動的な lookup が必要な変数」として、コンパイル時に区別しておく。
+  - 参照する位置ごとにインラインキャッシュを持たせる（attrset の識別子とスロット位置をキーにする）。C++ Nix はアクセスのたびに `forceAttrs` と最大8層の二分探索を行い、`with` 変数については thunk の回避も無効になっている（`eval.cc:933-964`）。
+- **thunk は本当に遅延が必要なものだけにする。** 次のものは確保だけで失敗しないので、即座に構築する。
+  - 関数リテラル（クロージャ）
+  - 静的なキーだけを持つ attrset リテラル
+  - リストリテラル
+  - C++ Nix の `maybeThunk` は、変数、リテラル、空リストしか特別扱いしない（`eval.cc:1070-1111, 1426`）。
+- **関数呼び出し**：
+  - 形式引数（`{ a, b ? x, ... }`）の照合は、コンパイル時に「ソート済みの形式引数配列と、ソート済みの引数 attrset のマージ」として準備しておく。
+  - 引数の数が分かっているカリー化された関数は、まとめて呼び出す。
+- **VM のスタックと深さ制限**：
+  - VM は自前のスタックを持ち、末尾呼び出しを最適化する。
+  - 深さの制限は、強制と呼び出しの両方を数える1本にし、捕捉できるエラーにする。C++ Nix は関数呼び出しの深さ制限と、`_exit(1)` する SIGSEGV ハンドラの2本立て（`src/libmain/unix/stack.cc:77`）。
+- **エラーは値として返す。**
+  - トレースは「位置、テンプレート id、引数」の形で記録し、表示するときにだけ整形する。「もしかして」の候補もそのときに計算する。
+  - `tryEval` に安い高速経路を用意する。
+  - C++ Nix はエラーを作る時点で整形し、候補探索を全属性名に対して行い、巻き戻しのたびに `addTrace` する。
+- **デバッガとプロファイラは別モードの VM（または計装したバイトコード）にし、通常の実行経路に条件分岐を置かない。** C++ Nix はホットパスで `debugRepl` を確認している。
+- **パース結果のキャッシュ**：ファイルの内容ハッシュをキーにして、バイトコードをディスクにキャッシュできる構造にする（任意。§11 Q4）。nixpkgs 全体のパースだけで 700 MiB 以上、数秒かかる（`5d9fdab3d`）。
+- **起動処理**：
+  - 組み込み関数のテーブルは静的で不変なものにする。
+  - `derivation` はネイティブに実装する。C++ Nix は `derivation-internal.nix` を起動のたびにパース・評価しており、呼び出しごとに `//` が出力の数＋2回走る。
+  - ただし外から見える属性は保つ：`all`、`drvAttrs`、`outputName`、`type`、`outPath`、`drvPath`、そして「`outputs` の先頭が既定の出力」。
+- **主要な組み込み関数に高速経路を用意する**：
+  - `sort` の比較関数が `lessThan` のときの特殊化
+  - `genericClosure` をハッシュベースにする
+  - `replaceStrings` を多パターン一括検索にする
+  - `attrNames` は辞書順のキャッシュを使う
 
 #### 6.1.2 値の表現
 - **基本方針**：16 バイト前後のタグ付き値と、ヒープオブジェクトの組み合わせ。
+  - 整数、bool、null、float は、Env のスロット、attrset、リストの要素に直接置き、ヒープに確保しない。
+  - C++ Nix はすべての値を別々に確保した `Value*` で持つ。これは 2010 年に保守的 GC の誤保持を避けるために選ばれた構造（`41c45a9b3`、`4dee28955`）で、正確な GC なら不要になる。
+- **文字列**：GC がスキャンしない領域に置く。C++ Nix は 2025-11 の `7cd325294` で、スキャンされない `GC_MALLOC_ATOMIC` からスキャンされる `GC_MALLOC` に変わっている。
+  - 連結はロープかスライスにし、`foldl'` で文字列を積み上げる O(n²) を避ける。
 - **attrset**：
   - symbol id で引けるようにしつつ、名前順の列挙を O(n) で取り出せる表現にする。
   - C++ Nix は symbol id 順に並んでいるため、`attrNames` や `toJSON` のたびに文字列順で並べ直している（`attr-set.hh:424-434`）。
@@ -236,7 +274,8 @@ C++ Nix 側の CA 安定化マイルストーン（#35）は 71%、dynamic deriv
 
 #### 6.1.5 derivation の生成（`derivationStrict` 相当）
 - **drv はいったんメモリ上の drv グラフに追加するだけにする。**
-  - ハッシュ（hash modulo と drv の store path）は1回だけ計算してメモ化する。C++ Nix の三重計算を回避する。
+  - ATerm への直列化は1回だけ行い、そのバッファから drv の store path と masked hash の両方を求める。masked hash は、出力を空にしたメモリ上の構造から直接計算し、`Derivation` をコピーしない。
+  - C++ Nix は、評価器の中で直列化と SHA-256 を3回、深いコピーを2〜3回行う。さらに store 側の `registerValidPath` で `.drv` を読み直してパースし、masked hash を4回目として再計算している。
   - store への書き込みは、ビルドやコピーが必要になった時点でまとめて行う（`--read-only` が自然に既定の動作になる）。
 - **hash modulo のメモはグローバルにしない。** 評価セッションと store dir をキーにしたキャッシュにする（C++ Nix の `masked::hashes` は「FIXME: global」）。
 - **`DrvDeep` context の展開**：drv の closure をメモ化して再利用する（`primops.cc:1794-1806`）。
@@ -534,6 +573,7 @@ C++ Nix 側の CA 安定化マイルストーン（#35）は 71%、dynamic deriv
 | Q8 | recursive-nix と builder RPC のどちらの方式に対応するか | nix-ninja など実際の利用者が必要とする方式を優先する |
 | Q9 | Darwin 対応の優先度 | フェーズ 5 以降 |
 | Q10 | 名前、ライセンス、ガバナンス | 未定 |
+| Q11 | 評価結果の互換の対象とする C++ Nix のバージョン | nixpkgs が要求する最低バージョン（2.18）か、最新版か。masked hash の衝突時の挙動（`b26204ba1`）のように、バージョンによって drv path が変わる変更がある |
 
 ---
 
@@ -559,3 +599,54 @@ C++ Nix 側の CA 安定化マイルストーン（#35）は 71%、dynamic deriv
 - [devenv is switching its Nix implementation to Tvix](https://devenv.sh/blog/2024/10/22/devenv-is-switching-its-nix-implementation-to-tvix/)
 - [Changelog: introducing lazy trees（Determinate Systems）](https://determinate.systems/blog/changelog-determinate-nix-352/)
 - [Nixpkgs release notes](https://nixos.org/manual/nixpkgs/stable/release-notes)（最低 Nix バージョンの推移）
+
+---
+
+## 付録 A：C++ Nix 評価器の変遷と性能劣化要因
+
+フェーズ 1 の設計判断の根拠として、C++ Nix の評価器の歴史を git の履歴から整理した。数値は上流のコミットメッセージにある計測値。
+
+### A.1 3つの時代
+
+| 時代 | 内容 | 主なコミット |
+|---|---|---|
+| 2003〜2010 | ATerm 上の項書き換え評価器。call-by-name で、関数本体に引数を代入し、結果をメモ化していた | — |
+| 2010 fast-eval | AST を直接たどるインタプリタ、call-by-need（thunk を更新）、静的スコープ解決（level/displacement）に全面書き換え。「旧評価器のほぼ7倍速い」 | `0910ae956`、`9985230c0`、`04c4bd362`、マージは `8032f26ca` |
+| 2010-10 | Boehm GC を導入（それまで新しい評価器はメモリを解放していなかった）。保守的 GC に合わせて、Env や Attr が `Value*` を持つ構造に作り直された | `e879a0371`、`41c45a9b3`、`4dee28955`、`2dc6d5094`（`maybeThunk`） |
+| 2022〜2026 | 改修の時代。位置情報とシンボルのテーブル化、Value の 16 バイト化、attrset の構造共有、AST 用アリーナ、並列評価の下準備（16 バイトのアトミックな Value、並行コンテナ、失敗値） | #6218、#13407、#13987、#15447、#15286 |
+
+**現在の負債の大半は、2010 年の2つの決定から来ている。** 1つ目は保守的 GC（Boehm）を採用したこと。2つ目は、AST を C++ の再帰でたどり、エラーを C++ 例外だけで扱う実行モデルにしたこと。
+
+### A.2 規模感（nixpkgs で `nix-env -qa`、`6138bc3de` 2025-09）
+
+| 項目 | 値 |
+|---|---|
+| CPU 時間 | 約 21 秒（GC は約 0.85〜1.6 秒） |
+| Value | 3,850 万個（616 MB） |
+| thunk | 2,940 万個（回避できた分は別に 2,820 万個） |
+| Env | 2,330 万個（461 MB） |
+| 関数呼び出し / primop 呼び出し | 2,100 万回 / 1,230 万回 |
+| attrset | 520 万個（構造共有の導入後で 0.9 GB） |
+| `//` | 217 万回（コピーした値は 6,100 万個から 2,600 万個に削減） |
+| GC ヒープ | 1.78 GB から 1.25 GB に削減 |
+
+nixpkgs 全体のパースだけで 700 MiB 以上、数秒かかる（`5d9fdab3d`）。
+
+### A.3 主な劣化要因と経緯
+
+| 要因 | 現状 | 経緯 | 本設計での対応 |
+|---|---|---|---|
+| 値を全部ヒープに確保し、ポインタで持つ | Env も Attr もリストも `Value*` で持つ | 保守的 GC の誤保持を避けるため（2010） | 正確な GC にし、スカラーはスロットに直接置く |
+| 保守的 GC | 全ワードをポインタ候補としてスキャンし、オブジェクトを動かせない。毎回ヒープ全体をマークする | 誤保持の実例：glibc の内部変数で RSS が 718→455 MiB（`455d1f01d`）、カウンタで 455→292 MiB（`0629601da`） | 世代別の正確な GC |
+| 文字列が GC にスキャンされる | `GC_MALLOC` で確保 | 2025-11 の `7cd325294`（理由の記載なし） | スキャンしない領域に置く |
+| `with` の検索 | アクセスのたびに強制と二分探索。thunk の回避も無効 | 2023 env-diet（`1fe66852f`）でトレードオフとして選ばれた | 参照位置ごとのインラインキャッシュ |
+| thunk の作りすぎ | 変数とリテラル以外はすべて thunk になる | `maybeThunk`（2010）以降ほとんど拡張されていない | クロージャ、attrset リテラル、リストは即座に構築 |
+| C スタックへの依存 | 末尾呼び出しがない。スタックは 60 MiB。SIGSEGV で `_exit(1)` | 2013 の SIGSEGV ハンドラ、2023 の関数呼び出しの深さ制限 | VM のスタック、末尾呼び出しの最適化、単一の深さ制限 |
+| 例外が唯一のエラー経路 | エラーを作る時点で整形し、全属性名に候補探索。行と列を求めるのにファイルを読み直す | #6204（2023）、`5d9fdab3d`（2024）。デバッガ経由の過剰な呼び出しで 22.9 s→784 ms の修正（`adbd08399`） | エラーは値で返し、表示時に整形 |
+| string context を毎回テキストからパース | 補間のたびにパース、`std::set` への構築、再確保 | 2006 年に導入。2023 年の型付け（`5576d5e98`）でも「性能が怖くて」保存形式は文字列のまま | インターンした id のソート済み配列 |
+| attrset が symbol id 順 | `attrNames` などで毎回文字列ソート | 2022 年以前はアドレス順（`8775be339`） | 辞書順の情報を持つ表現にする |
+| `//` の層構造 | 最大8層の検索と k-way マージ | 2025 #13987：ヒープ −30% と引き換えに最大 10% 遅く | 永続データ構造と定期的な平坦化 |
+| パース結果のキャッシュがない | 毎回すべてを字句解析からやり直す | 2013 年に削除（`6f809194d`） | バイトコードのキャッシュ |
+| `derivation` が Nix で実装されている | 起動のたびにパースし、呼び出しごとに `//` が走る | 2012（`921111d19`） | ネイティブ実装 |
+| drv の多重ハッシュ | 評価器内で3回、store 側で4回目 | 評価中の書き込みは 2003 年から、メモ化は 2005 年から | 直列化とハッシュ計算を1回にし、書き込みは遅延 |
+| 並列化の後付け | thunk の更新、呼び出しの深さ、トレースがスレッド非安全 | 2024〜2026 年に少しずつ下準備（本体はまだない） | 最初から CAS ベースの thunk とスレッドごとの割り当て |
