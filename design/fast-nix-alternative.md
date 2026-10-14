@@ -607,7 +607,8 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - 自前の builder（`altnix-daemon` の `build`）と、C++ Nix の `linux-derivation-builder.cc` と同じ作りのサンドボックス（`altnix-sandbox`、`unsafe` をここに閉じ込める）で、input-addressed、fixed-output、floating CA の derivation をビルドできる。floating CA は C++ Nix と同じ仮のパスでビルドし、自己参照を除いたハッシュから最終的なパスを決めて書き換える。
   - scheduler は C++ Nix の `Worker` と同じく derivation ごとの goal で動き、グラフは実行中に伸びる。CA や deferred な入力、dynamic な入力を持つ derivation は入力がそろってから resolve し、resolve した `.drv` をビルドして、その出力を元の derivation の realisation として登録する。フェーズ 2.5 で CLI に置いた dynamic derivation の scheduler は、これで daemon に移った（CLI 側も、C++ Nix の daemon に向けて使うために残す）。自前で扱えない derivation（builtin builder、recursive-nix、impure）は、その derivation だけを C++ Nix に任せる。
   - 出力の一致：hello をソースからビルドした結果の narHash は cache.nixos.org と一致した。`nixos-rebuild build`（上の最小構成）でローカルにビルドした 221 パスは、narHash、narSize、references とも C++ Nix のサンドボックスでのビルドと一致し、toplevel も同じパスになった。時間は 44.9 s と 60.1 s（C++ Nix 73.3 s）。CA の derivation（PoC の `tests/ca`、自己参照、出力同士の参照、CA の上の deferred な input-addressed など）は、出力パス、メタデータ、realisation とその参照、resolve した `.drv`、失敗の報告まで C++ Nix と一致した。`tests/functional/dyn-drv` 相当の 4 シナリオも、resolve を altnix daemon に任せて通る。
-  - 次：浅い resolve と build trace の永続化、nix-ninja のインクリメンタルビルド、realisation の substitute、`builtin:fetchurl`（stdenv の bootstrap に要る）。
+  - 浅い resolve：resolve が要る derivation は、入力の出力パスを realisation（ローカル、次に binary cache の `realisations/<id>.doi`）から求めてメモリ上で resolve し、resolve した derivation の realisation が見つかれば出力だけを substitute する。入力の実体は取得しない。build trace は C++ Nix と同じ `Realisations` と `RealisationsRefs` に永続化する。PoC の `scripts/shallow-check`（CA の 3 段の鎖で、中間の出力がキャッシュにない場合）では、C++ Nix は中間の 2 つをビルドし、altnix は何もビルドせずに同じ出力を得た。
+  - 次：nix-ninja のインクリメンタルビルド、`builtin:fetchurl`（stdenv の bootstrap に要る）、binary cache の realisation の署名の検証。
 
 ### フェーズ 5：NixOS 統合と移行
 - **作業**
