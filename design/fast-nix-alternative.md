@@ -501,7 +501,8 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - 上流のドキュメント（`doc/manual/source/store/build-trace.md`）が定義する coherence の要件に従う。
 - **登録時に署名を検証する。** 信頼ポリシーは trusted-public-keys と同じ枠組みで扱う（上流 #11393 の回避）。
 
-#### 6.7.3 resolve の「浅い」実行
+#### 6.7.3 shallow resolve
+- 本書での呼び方で、入力の実体まで realise せず、入力の出力パスだけで resolve することを指す。C++ Nix のコードにある「deep resolution」（#8947、入れ子の dynamic derivation を辿る resolve）とは別の話。
 - drv を resolve するのに必要なのは、**入力の出力パスだけ**。入力の実体（NAR）を取得する必要はない。
   - `ResolveDrv` ノードは、入力の出力パスを build trace（ローカル → substituter の順）から得る。実体は取得しない。
   - resolve した drv のキーで build trace を引き、ヒットすれば、最終出力だけを substitute する。
@@ -532,7 +533,7 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
 
 各フェーズは、それ単体で利用価値がある状態で終える。途中で止まっても成果が残るようにするため。
 
-**順序の変更（PoC の段階で決定）**：フェーズ 2 の後、フェーズ 3 より先に、フェーズ 4 のうち dynamic derivation の scheduler と浅い resolve（§6.7.3）を、既存の `nix-daemon` の上で試す（下の「フェーズ 2.5」）。
+**順序の変更（PoC の段階で決定）**：フェーズ 2 の後、フェーズ 3 より先に、フェーズ 4 のうち dynamic derivation の scheduler とshallow resolve（§6.7.3）を、既存の `nix-daemon` の上で試す（下の「フェーズ 2.5」）。
 
 - 理由：本ツールの差別化の中心は G4 で、その成否はまだ確かめていない。フェーズ 3（ストア、daemon、substituter）は量が多いが手本となる実装があり、不確実性が低い。動的な DAG の scheduler は実装例が少なく、評価器とストアの接点（IFD、`builtins.outputOf`、評価中のビルド）への要求もここで分かる。
 - 評価器の性能（1 スレッドの定数倍、NixOS の投機的な並列化）は、この時点では後回しにする。並列化とキャッシュで、§9 の B1・B5 の改善はすでに示せている。
@@ -570,7 +571,7 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
 ### フェーズ 2.5：dynamic derivation（既存の daemon の上で）
 - **作業**
   - 評価器：`builtins.outputOf`、`__contentAddressed`、`outputHashMode = "text"`、placeholder、`drv^out^out`。
-  - scheduler：動的な DAG を本ツールが展開し、浅い resolve を行い、個々の derivation のビルドは既存の `nix-daemon`（`ca-derivations` と `dynamic-derivations` を有効にしたもの）に任せる。
+  - scheduler：動的な DAG を本ツールが展開し、shallow resolve を行い、個々の derivation のビルドは既存の `nix-daemon`（`ca-derivations` と `dynamic-derivations` を有効にしたもの）に任せる。
 - **完了条件**
   - CA と dynamic derivation を使う式で、drv path と出力パスが C++ Nix と一致する。
   - `tests/functional/dyn-drv` 相当のシナリオと、nix-ninja による小さな C/C++ プロジェクトのインクリメンタルビルドが通る。
@@ -578,7 +579,7 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - 評価器：`tests/functional/dyn-drv` の式の drvPath と出力パス（または placeholder）が C++ Nix と一致した。動的な入力を持つ derivation を deferred にする規則は 2.32.1 になく、2026-03 以降の master にあるので、こちらは master に合わせた。
   - scheduler：動的な入力を持つ derivation は altnix が依存の深さごとに展開して resolve し、daemon には入力が静的な derivation のビルドだけを頼む。resolve 後の `.drv` のパスは daemon 自身の resolve と一致し、`dep-built-drv`、`build-built-drv`、`dep-built-drv-2`、`failing-outer` の 4 シナリオが 2.32.1 の daemon で通り、出力パスも C++ Nix のビルドと一致した。
   - nix-ninja（recursive-nix を使う最後のコミット）の `example-hello`：評価結果は C++ Nix と一致し、評価は 3.2 秒（C++ Nix 16.9 秒）。生成のステップとコンパイル単位の derivation は通ったが、リンクのステップで nix-ninja-task が失敗する。C++ Nix でも同じ resolved drv が同じエラーで失敗するので、nix-ninja と手元の Nix のバージョンの組み合わせの問題で、インクリメンタルビルドの確認は持ち越し。最新の nix-ninja は master の Nix にしかない `builder-rpc-v0` を要求するので、次は master の daemon で試す。
-  - 残り：浅い resolve（いまは入力をすべてビルドしてから resolve する）と build trace の永続化。既存の daemon の上では、CA の出力の realisation の照会（`QueryRealisation`）で浅い resolve の一部を試せる。
+  - 残り：shallow resolve（いまは入力をすべてビルドしてから resolve する）と build trace の永続化。既存の daemon の上では、CA の出力の realisation の照会（`QueryRealisation`）でshallow resolve の一部を試せる。
 
 ### フェーズ 3：ストア、daemon、substituter
 - **作業**
@@ -602,14 +603,16 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - nixpkgs の stdenv をソースから bootstrap して、C++ Nix と同じ出力パスになる（input-addressed）。
   - `tests/functional/ca`、`tests/functional/dyn-drv` 相当のシナリオを通る（移植したテスト）。
   - [nix-ninja](https://github.com/pdtpartners/nix-ninja) で中規模の C/C++ プロジェクトをインクリメンタルにビルドできる。
-  - 浅い resolve（§6.7.3）で、中間物を取得せずに dynamic derivation の出力を substitute できる。
+  - shallow resolve（§6.7.3）で、中間物を取得せずに dynamic derivation の出力を substitute できる。
 - **PoC の途中経過（2026-10-14、C++ Nix 2.32.1）**
   - 自前の builder（`altnix-daemon` の `build`）と、C++ Nix の `linux-derivation-builder.cc` と同じ作りのサンドボックス（`altnix-sandbox`、`unsafe` をここに閉じ込める）で、input-addressed、fixed-output、floating CA の derivation をビルドできる。floating CA は C++ Nix と同じ仮のパスでビルドし、自己参照を除いたハッシュから最終的なパスを決めて書き換える。
   - scheduler は C++ Nix の `Worker` と同じく derivation ごとの goal で動き、グラフは実行中に伸びる。CA や deferred な入力、dynamic な入力を持つ derivation は入力がそろってから resolve し、resolve した `.drv` をビルドして、その出力を元の derivation の realisation として登録する。フェーズ 2.5 で CLI に置いた dynamic derivation の scheduler は、これで daemon に移った（CLI 側も、C++ Nix の daemon に向けて使うために残す）。自前で扱えない derivation（builtin builder、recursive-nix、impure）は、その derivation だけを C++ Nix に任せる。
   - 出力の一致：hello をソースからビルドした結果の narHash は cache.nixos.org と一致した。`nixos-rebuild build`（上の最小構成）でローカルにビルドした 221 パスは、narHash、narSize、references とも C++ Nix のサンドボックスでのビルドと一致し、toplevel も同じパスになった。時間は 44.9 s と 60.1 s（C++ Nix 73.3 s）。CA の derivation（PoC の `tests/ca`、自己参照、出力同士の参照、CA の上の deferred な input-addressed など）は、出力パス、メタデータ、realisation とその参照、resolve した `.drv`、失敗の報告まで C++ Nix と一致した。`tests/functional/dyn-drv` 相当の 4 シナリオも、resolve を altnix daemon に任せて通る。
-  - 浅い resolve：resolve が要る derivation は、入力の出力パスを realisation（ローカル、次に binary cache の `realisations/<id>.doi`）から求めてメモリ上で resolve し、resolve した derivation の realisation が見つかれば出力だけを substitute する。入力の実体は取得しない。build trace は C++ Nix と同じ `Realisations` と `RealisationsRefs` に永続化する。PoC の `scripts/shallow-check`（CA の 3 段の鎖で、中間の出力がキャッシュにない場合）では、C++ Nix は中間の 2 つをビルドし、altnix は何もビルドせずに同じ出力を得た。
+  - shallow resolve：resolve が要る derivation は、入力の出力パスを realisation（ローカル、次に binary cache の `realisations/<id>.doi`）から求めてメモリ上で resolve し、resolve した derivation の realisation が見つかれば出力だけを substitute する。入力の実体は取得しない。build trace は C++ Nix と同じ `Realisations` と `RealisationsRefs` に永続化する。PoC の `scripts/shallow-check`（CA の 3 段の鎖で、中間の出力がキャッシュにない場合）では、C++ Nix は中間の 2 つをビルドし、altnix は何もビルドせずに同じ出力を得た。
   - nix-ninja：Nix の外で動かす形（コンパイル単位ごとに CA の derivation を `nix derivation add` してビルドする）で、zstd（コンパイル単位 44 個）を altnix daemon でビルドし、インクリメンタルビルドを確かめた。ソースを 1 つ変えるとそのコンパイル単位とリンクだけ、コメントだけの変更ではそのコンパイル単位だけがビルドされ（CA の early cutoff）、ビルド数も時間も C++ Nix と同程度（最初のビルド 61.0 s 対 59.2 s、コメントの変更 8.8 s 対 10.2 s）。early cutoff には、nix-ninja が入力の一覧を placeholder の順に並べるのを直す必要があった（nix-ninja 側の問題で、C++ Nix でも同じ）。nix-ninja を derivation の中で動かす形は、recursive-nix（altnix は C++ Nix に任せる）か、最新版の builder RPC が要る。
-  - 次：builder RPC、`builtin:fetchurl`（stdenv の bootstrap に要る）、binary cache の realisation の署名の検証。
+  - realisation の署名：`require-sigs` のもとで、binary cache の realisation と、信頼されていないクライアントの `RegisterDrvOutput` に、信頼する鍵の署名を要求する（C++ Nix 2.32 はどちらも確かめない）。C++ Nix が署名した realisation を altnix が検証できることを確かめた。
+  - `builtin:fetchurl`：daemon の中で実行する（C++ Nix はサンドボックスの中の子プロセス）。nixpkgs の bootstrap files、`unpack`（無圧縮と xz の NAR）、ハッシュの不一致、404 で、出力と失敗の報告が C++ Nix と一致した。
+  - 次：builder RPC、`secret-key-files`（ビルドしたパスと realisation への署名）、stdenv の bootstrap を通しで altnix でビルドして C++ Nix と出力を比べる。
 
 ### フェーズ 5：NixOS 統合と移行
 - **作業**
