@@ -321,6 +321,7 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
 
 #### 6.1.6 IFD（import-from-derivation）
 - IFD はビルダーへの非同期の依頼として扱う。並列評価の場合、IFD を待っているあいだも他の thunk の評価を進める。
+- **PoC での実装**：評価器はビルドの手段を持たず、CLI が渡す関数（`Vm::realiser`）に「derivation と出力名」を渡す。CLI は derivation の閉包を既存の daemon に送り、出力をビルドさせる（C++ Nix の `realiseContext`）。いまは同期的で、補助スレッドは IFD に当たると手を引く。home-manager のテスト集合（数百の構成、IFD あり）で drvPath が C++ Nix と一致した。
 
 ### 6.2 ソースアクセスと fetcher（`tool-source`）
 
@@ -350,6 +351,7 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - アーカイブは展開せず、git object store に取り込む方式を基本にする（C++ Nix の `tarball-cache-v2` に相当）。
   - API の応答は store ではなく HTTP キャッシュに置く。
 - **substituter を先に確認しない。** final input は fetcher のキャッシュ（ローカル）を最優先する。substituter は fetcher が失敗したときのフォールバックとし、設定で無効にできるようにする（C++ Nix の `fetchers.cc:312-351` の問題を回避）。
+  - PoC で実装した。NAR ハッシュの分かっている入力の取得に失敗したら、バイナリキャッシュの narinfo と NAR を取って fetcher のキャッシュに展開し、mount する。中身は NAR ハッシュで確かめるので署名は要らない。home-manager のテストが使う `git.sr.ht` の tarball（PoC の環境では遮断）を、C++ Nix はバイナリキャッシュから取って先へ進んでいたので、これがないと評価結果が変わっていた。
 - **TTL**：ドメインごと・入力の種類ごとに設定できるようにする。
 
 - **PoC での実装（`altnix-fetch` と評価器の `fetch.rs`）**：
@@ -375,6 +377,9 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
 - **PoC での実装（評価器の `flake.rs`）**：`readFlake`、`lockFlake`（`computeLocks`）、`callFlake` は C++ Nix を移植し、`call-flake.nix` はそのまま埋め込んだ。まず出力の一致を優先し、上の遅延化（`self.outPath`、入力の `outputs`）はまだ行っていない。
   - lock file の作成と更新（全体、一部の入力、入力の変更と削除）で、書かれる lock file はバイト単位で、差分の表示も C++ Nix と一致した。
   - C++ Nix の挙動で合わせる必要があったもの：入力の取得はプロセスごとに一度（`InputCache`）、Git の作業ツリーの状態もプロセスごとに一度（`getCachedWorkdirInfo`。lock file を書いた後に読み直しても dirty にならない）、`--override-input` では lock file を書かない。
+  - 実物の flake（home-manager、32 ノードの NixOS 構成の flake）で、lock file、drvPath（option の JSON、IFD を含むテスト集合）、`nixConfig` の警告が C++ Nix と一致した。過程で見つかった不一致は、mount した木のファイルの位置（C++ Nix は store path で示す）と、名前の違うソースのコピーの取り違えだった。
+  - §9 の指標：B4（nixpkgs を Git の flake にして 1 ファイル変更後の評価）は 3.2 s 対 14.0 s、B5 は 0.7 s 対 1.7〜2.3 s、B6（入力 61 個の lock）は 14 ms 対 100 ms。C++ Nix 2.32 は Git の作業ツリーを毎回ストアにコピーする。無関係なファイルの変更でも評価し直すのは、ルート flake の narHash を木全体から計算しているため（上の「遅延させる」は未実装）。
+  - モジュールシステムが中心の評価（home-manager のテスト集合）は、altnix が 25% 遅い。評価器の 1 スレッドの性能の課題（§6.1.3 の NixOS と同じ）。
   - レジストリ（`altnix-compat` の `registry.rs`）：C++ Nix と同じく、`--override-flake`、ユーザー、システム、グローバルの順に引き、flake の入力と `fetchTree` ではユーザーとシステムのものを使わない。flake ごとのレジストリはまだない。レジストリのファイルは eval cache の依存として記録する。ローカルのレジストリで、lock file、評価結果、エラーの文面が C++ Nix 2.32.1 と一致した。
 
 ### 6.4 eval cache（`tool-eval-cache`）
