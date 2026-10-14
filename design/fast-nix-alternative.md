@@ -425,6 +425,7 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - サーバーからのストリーミング（ビルドログ、進捗）。
   - スキーマはバージョン付きにし、機能の有無をネゴシエーションで決める。
   - トランスポートは Unix ソケットと SSH。
+- **PoC での実装（`altnix daemon`、`altnix-daemon` crate）**：サーバー側は C++ Nix 2.32 と同じ 1.38 を話し、既存の `nix` コマンドからそのまま使える。1 プロセスでクライアントごとにスレッドを立てる（C++ Nix は fork する）。ビルドはフェーズ 4 まで、C++ Nix の `nix-daemon --stdio` を同じストアで子プロセスとして動かして任せる（クライアントの信頼を `--force-trusted`／`--force-untrusted` で引き継ぎ、ログはそのまま中継する）。新しいプロトコルはまだ。
 
 #### 6.5.3 ローカルストア
 - **SQLite（WAL）を使う。** 読み取り接続をプールして並列化し、書き込みは1本の接続で行う。
@@ -438,12 +439,24 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - build trace の参照も GC の対象に含める（§6.7.4）。
 - **出力の登録**：参照のスキャン、NAR ハッシュの計算、重複排除（optimise）を、1回の読み込み（ストリーム）で行う。
 - **ロック**：同じ drv（CA を含む）を同時にビルドしないよう、drv の単位でロックする（C++ Nix の `derivation-building-goal.cc:400` の FIXME）。
+- **PoC での実装（`altnix-store` crate の `local`）**：案 A。C++ Nix の `db.sqlite`（スキーマ 10）、`big-lock`、`<path>.lock`、`gc.lock`、temporary root のファイル、GC の socket をそのまま使うので、C++ Nix のプロセスと同時に動き、C++ Nix に戻せる（G6 を確認済み）。
+  - daemon は 1 プロセスなので、temporary root はクライアントごとのファイル（`temproots/<pid>-<n>`）にし、接続が切れたら消す。C++ Nix の GC は先頭の pid だけを読むので、そのまま扱える。
+  - NAR の取り込みは、展開と NAR ハッシュの計算を 1 回の読み込みで行い、パーミッションと mtime もその場で正規化する。32 MiB までのオブジェクト（`.drv` など）は一時ディレクトリを経ずにメモリから書く（`AddToStore` 1 回 0.53 ms → 0.19 ms）。
+  - GC は参照グラフ（と derivation の出力の表）をデータベースから一度に読み、生きているパスをメモリ上で求める。消すのは参照元から順に、1 パスずつ（その間に届いた root を毎回確かめるため）。
+  - 未実装：optimise、修復、信頼されないクライアントが追加した `.drv` の出力パスの検査（`checkInvariants`。`hashDerivationModulo` を評価器からストアに移す必要がある）。
 
 #### 6.5.4 substituter クライアント
 - HTTP/2 または HTTP/3 で、narinfo を多重化して並列に問い合わせる。substituter の優先度は維持する。
 - NAR の取得、展開、ハッシュの検証を、パイプライン化したストリーム処理にする（xz、zstd、brotli に対応）。
 - 署名の検証（ed25519）と、trusted-public-keys のポリシーは C++ Nix と同じ意味にする。
 - 「存在しない」という narinfo の結果は TTL 付きでキャッシュする。「存在する」結果もディスクにキャッシュする。
+- **PoC での実装**：HTTP/1.1（ureq）で、接続をプールして並列に照会する。
+  - 見つかったパスの参照先の照会をすぐに始める（閉包の深さの回数の往復を待たない）。
+  - `QueryMissing` で `.narinfo` が見つかった時点で、NAR をメモリ上に先にダウンロードし、展開とハッシュの確認まで済ませておく。ストアに書くのはクライアントが `BuildPaths` で求めてから。
+  - 展開とハッシュの計算は並列に行い、ストアへのファイル作成は一度に 1 スレッドにする。この環境では複数のスレッドが同時にファイルを作ると、カーネル時間が数倍になった。
+  - 参照先がそろったパスからまとめて登録する。
+  - `.narinfo` の照会結果は C++ Nix と同じ TTL でディスクに残す。
+  - zstd、xz、bzip2 に対応する（brotli はまだ）。HTTP/2 による多重化もまだ。
 
 ### 6.6 scheduler と builder（`tool-build`）
 
@@ -574,6 +587,11 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - 既存の NixOS マシンで `nix-daemon` を本ツールの daemon に置き換え、既存の `nix` CLI と `nixos-rebuild` が動く。
   - C++ Nix の daemon に戻しても、ストアの整合性が保たれる（G6）。
   - substitute のスループットが基準値を上回る。
+- **PoC の結果（2026-10-14、C++ Nix 2.32.1）**
+  - `nix` CLI：chroot ストアの上で、`nix store info`、`nix-store -r`、`--add`、`nix store add-file`／`add-path`／`cat`／`verify`、`nix-instantiate` とビルド、`nix build -f nixpkgs hello`、`nix copy`、`nix-store --gc`（root と他プロセスの temporary root を守る）が通る（PoC の `scripts/daemon-check`、11 項目）。`nixos-rebuild` は、NixOS で試せる環境がまだないので未確認。
+  - G6：altnix daemon が使ったストアを C++ Nix が直接開いて、`--verify --check-contents`、照会、GC が通り、また altnix に戻せる。substitute した 84 パスのメタデータは、C++ Nix が同じものを substitute した結果と完全に一致した。
+  - B7：git の閉包（84 パス、ダウンロード 128 MiB）を空のストアに取得する時間は、cache.nixos.org から 3.03 s（C++ Nix 5.84 s、どちらも 5 回の中央値、`.narinfo` のキャッシュなし）、ローカルの `file://` キャッシュから 1.23〜1.30 s（C++ Nix 1.61〜1.78 s）。基準値を上回った。NixOS の閉包（数千パス）での測定はディスクの空きが足りず、まだ。
+  - 残り：本物の NixOS での `nixos-rebuild`、新しいプロトコル、`--stdio`（ssh-ng）、optimise、`.drv` の出力パスの検査、HTTP/2。
 
 ### フェーズ 4：scheduler、builder、CA、dynamic derivation
 - **作業**
