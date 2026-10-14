@@ -561,8 +561,8 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - `tests/functional/dyn-drv` 相当のシナリオと、nix-ninja による小さな C/C++ プロジェクトのインクリメンタルビルドが通る。
 - **PoC の結果（2026-10-14）**
   - 評価器：`tests/functional/dyn-drv` の式の drvPath と出力パス（または placeholder）が C++ Nix と一致した。動的な入力を持つ derivation を deferred にする規則は 2.32.1 になく、2026-03 以降の master にあるので、こちらは master に合わせた。
-  - scheduler：動的な入力を持つ derivation は altnix が段ごとに展開して resolve し、daemon には入力が静的な derivation のビルドだけを頼む。resolve 後の `.drv` のパスは daemon 自身の resolve と一致し、`dep-built-drv`、`build-built-drv`、`dep-built-drv-2`、`failing-outer` の 4 シナリオが 2.32.1 の daemon で通り、出力パスも C++ Nix のビルドと一致した。
-  - nix-ninja（recursive-nix を使う最後の版）の `example-hello`：評価結果は C++ Nix と一致し、評価は 3.2 秒（C++ Nix 16.9 秒）。生成段とコンパイル単位の derivation は通ったが、リンク段で nix-ninja-task が失敗する。C++ Nix でも同じ resolved drv が同じエラーで失敗するので、nix-ninja と手元の Nix の版の組み合わせの問題で、インクリメンタルビルドの確認は持ち越し。最新の nix-ninja は master の Nix にしかない `builder-rpc-v0` を要求するので、次は master の daemon で試す。
+  - scheduler：動的な入力を持つ derivation は altnix が依存の深さごとに展開して resolve し、daemon には入力が静的な derivation のビルドだけを頼む。resolve 後の `.drv` のパスは daemon 自身の resolve と一致し、`dep-built-drv`、`build-built-drv`、`dep-built-drv-2`、`failing-outer` の 4 シナリオが 2.32.1 の daemon で通り、出力パスも C++ Nix のビルドと一致した。
+  - nix-ninja（recursive-nix を使う最後のコミット）の `example-hello`：評価結果は C++ Nix と一致し、評価は 3.2 秒（C++ Nix 16.9 秒）。生成のステップとコンパイル単位の derivation は通ったが、リンクのステップで nix-ninja-task が失敗する。C++ Nix でも同じ resolved drv が同じエラーで失敗するので、nix-ninja と手元の Nix のバージョンの組み合わせの問題で、インクリメンタルビルドの確認は持ち越し。最新の nix-ninja は master の Nix にしかない `builder-rpc-v0` を要求するので、次は master の daemon で試す。
   - 残り：浅い resolve（いまは入力をすべてビルドしてから resolve する）と build trace の永続化。既存の daemon の上では、CA の出力の realisation の照会（`QueryRealisation`）で浅い resolve の一部を試せる。
 
 ### フェーズ 3：ストア、daemon、substituter
