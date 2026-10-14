@@ -425,7 +425,7 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - サーバーからのストリーミング（ビルドログ、進捗）。
   - スキーマはバージョン付きにし、機能の有無をネゴシエーションで決める。
   - トランスポートは Unix ソケットと SSH。
-- **PoC での実装（`altnix daemon`、`altnix-daemon` crate）**：サーバー側は C++ Nix 2.32 と同じ 1.38 を話し、既存の `nix` コマンドからそのまま使える。1 プロセスでクライアントごとにスレッドを立てる（C++ Nix は fork する）。ビルドはフェーズ 4 まで、C++ Nix の `nix-daemon --stdio` を同じストアで子プロセスとして動かして任せる（クライアントの信頼を `--force-trusted`／`--force-untrusted` で引き継ぎ、ログはそのまま中継する）。新しいプロトコルはまだ。
+- **PoC での実装（`altnix daemon`、`altnix-daemon` crate）**：サーバー側は C++ Nix 2.32 と同じ 1.38 を話し、既存の `nix` コマンドからそのまま使える。1 プロセスでクライアントごとにスレッドを立てる（C++ Nix は fork する）。ビルドは、input-addressed と fixed-output の derivation を自前の builder とサンドボックス（フェーズ 4）で行い、それ以外は C++ Nix の `nix-daemon --stdio` を同じストアで子プロセスとして動かして任せる（クライアントの信頼を `--force-trusted`／`--force-untrusted` で引き継ぎ、ログはそのまま中継する）。新しいプロトコルはまだ。
 
 #### 6.5.3 ローカルストア
 - **SQLite（WAL）を使う。** 読み取り接続をプールして並列化し、書き込みは1本の接続で行う。
@@ -603,6 +603,10 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - `tests/functional/ca`、`tests/functional/dyn-drv` 相当のシナリオを通る（移植したテスト）。
   - [nix-ninja](https://github.com/pdtpartners/nix-ninja) で中規模の C/C++ プロジェクトをインクリメンタルにビルドできる。
   - 浅い resolve（§6.7.3）で、中間物を取得せずに dynamic derivation の出力を substitute できる。
+- **PoC の途中経過（2026-10-14、C++ Nix 2.32.1）**
+  - 自前の builder（`altnix-daemon` の `build`）と、C++ Nix の `linux-derivation-builder.cc` と同じ作りのサンドボックス（`altnix-sandbox`、`unsafe` をここに閉じ込める）で、input-addressed と fixed-output の derivation をビルドできる。scheduler は依存順に `max-jobs` 本まで並列に動かし、扱えない derivation を含む依頼は `nix-daemon --stdio` に任せる。
+  - 出力の一致：hello をソースからビルドした結果の narHash は cache.nixos.org と一致した。`nixos-rebuild build`（上の最小構成）でローカルにビルドした 221 パスは、narHash、narSize、references とも C++ Nix のサンドボックスでのビルドと一致し、toplevel も同じパスになった。時間は 44.9 s と 60.1 s（C++ Nix 73.3 s）。
+  - 次：floating CA（scratch パス、自己参照を除いたハッシュ、書き換え、realisation）、dynamic derivation の scheduler（PoC の CLI にあるもの）を daemon の builder の上に移す、浅い resolve と build trace の永続化、nix-ninja のインクリメンタルビルド。stdenv の bootstrap は、`builtin:fetchurl` と、ディスクの空きが要る。
 
 ### フェーズ 5：NixOS 統合と移行
 - **作業**
