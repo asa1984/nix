@@ -511,6 +511,11 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
 
 各フェーズは、それ単体で利用価値がある状態で終える。途中で止まっても成果が残るようにするため。
 
+**順序の変更（PoC の段階で決定）**：フェーズ 2 の後、フェーズ 3 より先に、フェーズ 4 のうち dynamic derivation の scheduler と浅い resolve（§6.7.3）を、既存の `nix-daemon` の上で試す（下の「フェーズ 2.5」）。
+
+- 理由：本ツールの差別化の中心は G4 で、その成否はまだ確かめていない。フェーズ 3（ストア、daemon、substituter）は量が多いが手本となる実装があり、不確実性が低い。動的な DAG の scheduler は実装例が少なく、評価器とストアの接点（IFD、`builtins.outputOf`、評価中のビルド）への要求もここで分かる。
+- 評価器の性能（1 スレッドの定数倍、NixOS の投機的な並列化）は、この時点では後回しにする。並列化とキャッシュで、§9 の B1・B5 の改善はすでに示せている。
+
 ### フェーズ 0：土台と測定基盤
 - **作業**
   - `nix-compat` の評価と採用判断（§11 Q1）。
@@ -540,6 +545,14 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - 既存の主要な flake（nixpkgs、home-manager、それなりの規模の NixOS 構成）の `flake.lock` を、変更せずに読み書きできる。
   - lock を更新した場合も、C++ Nix と同じ結果になる。
   - §9 の flake 関連の指標で、基準値を明確に上回る。
+
+### フェーズ 2.5：dynamic derivation（既存の daemon の上で）
+- **作業**
+  - 評価器：`builtins.outputOf`、`__contentAddressed`、`outputHashMode = "text"`、placeholder、`drv^out^out`。
+  - scheduler：動的な DAG を本ツールが展開し、浅い resolve を行い、個々の derivation のビルドは既存の `nix-daemon`（`ca-derivations` と `dynamic-derivations` を有効にしたもの）に任せる。
+- **完了条件**
+  - CA と dynamic derivation を使う式で、drv path と出力パスが C++ Nix と一致する。
+  - `tests/functional/dyn-drv` 相当のシナリオと、nix-ninja による小さな C/C++ プロジェクトのインクリメンタルビルドが通る。
 
 ### フェーズ 3：ストア、daemon、substituter
 - **作業**
