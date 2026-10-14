@@ -589,10 +589,10 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - C++ Nix の daemon に戻しても、ストアの整合性が保たれる（G6）。
   - substitute のスループットが基準値を上回る。
 - **PoC の結果（2026-10-14、C++ Nix 2.32.1）**
-  - `nix` CLI：chroot ストアの上で、`nix store info`、`nix-store -r`、`--add`、`nix store add-file`／`add-path`／`cat`／`verify`、`nix-instantiate` とビルド、`nix build -f nixpkgs hello`、`nix copy`、`nix-store --gc`（root と他プロセスの temporary root を守る）が通る（PoC の `scripts/daemon-check`、11 項目）。`nixos-rebuild` は、NixOS で試せる環境がまだないので未確認。
+  - `nix` CLI：chroot ストアの上で、`nix store info`、`nix-store -r`、`--add`、`nix store add-file`／`add-path`／`cat`／`verify`、`nix-instantiate` とビルド、`nix build -f nixpkgs hello`、`nix copy`、`nix-store --gc`（root と他プロセスの temporary root を守る）が通る（PoC の `scripts/daemon-check`、12 項目）。`nixos-rebuild build` も通り（最小構成にキャッシュにないファイルを足し、472 パスの substitute と約 100 個のビルド）、toplevel のパスは C++ Nix の daemon での結果と一致した。時間は 49〜50 s（C++ Nix 78〜82 s）。`switch` は、NixOS で試せる環境がないので未確認。
   - G6：altnix daemon が使ったストアを C++ Nix が直接開いて、`--verify --check-contents`、照会、GC が通り、また altnix に戻せる。substitute した 84 パスのメタデータは、C++ Nix が同じものを substitute した結果と完全に一致した。
-  - B7：git の閉包（84 パス、ダウンロード 128 MiB）を空のストアに取得する時間は、cache.nixos.org から 3.03 s（C++ Nix 5.84 s、どちらも 5 回の中央値、`.narinfo` のキャッシュなし）、ローカルの `file://` キャッシュから 1.23〜1.30 s（C++ Nix 1.61〜1.78 s）。基準値を上回った。NixOS の閉包（数千パス）での測定はディスクの空きが足りず、まだ。
-  - 残り：本物の NixOS での `nixos-rebuild`、新しいプロトコル、`--stdio`（ssh-ng）、optimise、HTTP/2。
+  - B7：git の閉包（84 パス、ダウンロード 128 MiB）を空のストアに取得する時間は、cache.nixos.org から 3.03 s（C++ Nix 5.84 s、どちらも 5 回の中央値、`.narinfo` のキャッシュなし）、ローカルの `file://` キャッシュから 1.23〜1.30 s（C++ Nix 1.61〜1.78 s）。基準値を上回った。数千パスの閉包での測定はディスクの空きが足りず、まだ（上の NixOS 最小構成は 609 パス）。
+  - 残り：本物の NixOS での `nixos-rebuild switch`、新しいプロトコル、`--stdio`（ssh-ng）、optimise、HTTP/2。
 
 ### フェーズ 4：scheduler、builder、CA、dynamic derivation
 - **作業**
