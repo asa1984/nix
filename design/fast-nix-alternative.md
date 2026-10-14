@@ -443,7 +443,8 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - daemon は 1 プロセスなので、temporary root はクライアントごとのファイル（`temproots/<pid>-<n>`）にし、接続が切れたら消す。C++ Nix の GC は先頭の pid だけを読むので、そのまま扱える。
   - NAR の取り込みは、展開と NAR ハッシュの計算を 1 回の読み込みで行い、パーミッションと mtime もその場で正規化する。32 MiB までのオブジェクト（`.drv` など）は一時ディレクトリを経ずにメモリから書く（`AddToStore` 1 回 0.53 ms → 0.19 ms）。
   - GC は参照グラフ（と derivation の出力の表）をデータベースから一度に読み、生きているパスをメモリ上で求める。消すのは参照元から順に、1 パスずつ（その間に届いた root を毎回確かめるため）。
-  - 未実装：optimise、修復、信頼されないクライアントが追加した `.drv` の出力パスの検査（`checkInvariants`。`hashDerivationModulo` を評価器からストアに移す必要がある）。
+  - `.drv` の登録時に `checkInvariants` と同じ検査をする（`hashDerivationModulo` は `altnix-compat` に移し、評価器と共有）。
+  - 未実装：optimise、修復。
 
 #### 6.5.4 substituter クライアント
 - HTTP/2 または HTTP/3 で、narinfo を多重化して並列に問い合わせる。substituter の優先度は維持する。
@@ -591,7 +592,7 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - `nix` CLI：chroot ストアの上で、`nix store info`、`nix-store -r`、`--add`、`nix store add-file`／`add-path`／`cat`／`verify`、`nix-instantiate` とビルド、`nix build -f nixpkgs hello`、`nix copy`、`nix-store --gc`（root と他プロセスの temporary root を守る）が通る（PoC の `scripts/daemon-check`、11 項目）。`nixos-rebuild` は、NixOS で試せる環境がまだないので未確認。
   - G6：altnix daemon が使ったストアを C++ Nix が直接開いて、`--verify --check-contents`、照会、GC が通り、また altnix に戻せる。substitute した 84 パスのメタデータは、C++ Nix が同じものを substitute した結果と完全に一致した。
   - B7：git の閉包（84 パス、ダウンロード 128 MiB）を空のストアに取得する時間は、cache.nixos.org から 3.03 s（C++ Nix 5.84 s、どちらも 5 回の中央値、`.narinfo` のキャッシュなし）、ローカルの `file://` キャッシュから 1.23〜1.30 s（C++ Nix 1.61〜1.78 s）。基準値を上回った。NixOS の閉包（数千パス）での測定はディスクの空きが足りず、まだ。
-  - 残り：本物の NixOS での `nixos-rebuild`、新しいプロトコル、`--stdio`（ssh-ng）、optimise、`.drv` の出力パスの検査、HTTP/2。
+  - 残り：本物の NixOS での `nixos-rebuild`、新しいプロトコル、`--stdio`（ssh-ng）、optimise、HTTP/2。
 
 ### フェーズ 4：scheduler、builder、CA、dynamic derivation
 - **作業**
