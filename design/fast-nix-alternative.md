@@ -355,7 +355,7 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
 - **PoC での実装（`altnix-fetch` と評価器の `fetch.rs`）**：
   - 取得したものはキャッシュに置き、NAR ハッシュで store path を決めて、その store path にマウントする（C++ Nix の `mountInput` と同じ）。store へのコピーは、ビルドや `eval-jobs` で derivation の入力として必要になったときだけ行う。C++ Nix の lazy trees と同じ方向。
   - tarball は展開してディレクトリとしてキャッシュし、NAR ハッシュもキャッシュする（git object store への取り込みはまだ）。Git は `git` コマンドで扱い、コミットの木は blob をフィルタなしで書き出す（`git archive` は `export-ignore` を必ず適用するので使わない）。
-  - `tarball`、`file`、`path`、`git`、`github`、`gitlab`、`sourcehut` の入力で、返す属性と store path が C++ Nix 2.32.1 と一致した。サブモジュール、LFS、レジストリ、`access-tokens` は未対応。
+  - `tarball`、`file`、`path`、`git`、`github`、`gitlab`、`sourcehut` の入力で、返す属性と store path が C++ Nix 2.32.1 と一致した。サブモジュール、LFS、`access-tokens` は未対応。
 
 ### 6.3 flake（`tool-flake`）
 
@@ -375,6 +375,7 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
 - **PoC での実装（評価器の `flake.rs`）**：`readFlake`、`lockFlake`（`computeLocks`）、`callFlake` は C++ Nix を移植し、`call-flake.nix` はそのまま埋め込んだ。まず出力の一致を優先し、上の遅延化（`self.outPath`、入力の `outputs`）はまだ行っていない。
   - lock file の作成と更新（全体、一部の入力、入力の変更と削除）で、書かれる lock file はバイト単位で、差分の表示も C++ Nix と一致した。
   - C++ Nix の挙動で合わせる必要があったもの：入力の取得はプロセスごとに一度（`InputCache`）、Git の作業ツリーの状態もプロセスごとに一度（`getCachedWorkdirInfo`。lock file を書いた後に読み直しても dirty にならない）、`--override-input` では lock file を書かない。
+  - レジストリ（`altnix-compat` の `registry.rs`）：C++ Nix と同じく、`--override-flake`、ユーザー、システム、グローバルの順に引き、flake の入力と `fetchTree` ではユーザーとシステムのものを使わない。flake ごとのレジストリはまだない。レジストリのファイルは eval cache の依存として記録する。ローカルのレジストリで、lock file、評価結果、エラーの文面が C++ Nix 2.32.1 と一致した。
 
 ### 6.4 eval cache（`tool-eval-cache`）
 
