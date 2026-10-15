@@ -645,6 +645,17 @@ dynamic derivation と builder RPC（`builder-rpc-v0`）を実際の規模で試
     - 変更の後は、変えたクレートとそれに依存するものだけがビルドされる。残りの時間の大半は、バイナリの derivation の fat LTO（`codegen-units = 1`）。
     - どの変更でも、最後にバイナリを置く derivation の出力は同じパスになった（コメントや使われない関数ではバイナリが変わらない）。CA の early cutoff で、その derivation はビルドされない。
     - 最初のビルドは cargo より遅い。derivation の出力はビルドが終わってから使えるので、cargo のパイプライン化（依存先の rmeta ができた時点で次を始める）が使えないため。
+    - LTO なしのプロファイル（`nolto`：`lto = false`、`codegen-units = 16`）では、最後のリンクが軽くなり、差分ビルドが大きく縮んだ。
+
+      | 操作（`nolto`） | buildRustPackage | cargo-dyn（ビルドした derivation の数） |
+      |---|---|---|
+      | 最初のビルド | 200.4 s | 181.9 s（116） |
+      | altnix-cli にコメントを追加 | 129.8 s | 11.5 s（2） |
+      | altnix-store にコメントを追加 | 126.1 s | 27.6 s（4） |
+      | altnix-heap に関数を追加 | 133.2 s | 28.6 s（4） |
+      | altnix-compat にコメントを追加 | 130.9 s | 180.0 s（116） |
+
+      代わりに評価が遅くなる。`scripts/perf-check` の命令数は `release` に比べて 4〜16% 多い（`bench/modules` +16.3%、`bench/strings` +9.7%、`bench/calls` +5.7%、`bench/packages` +5.3%、nixpkgs の `firefox.drvPath` +3.9%）。開発中の反復には `nolto`、配布には `release`、という使い分けになる。
 
 ### フェーズ 5：NixOS 統合と移行
 - **作業**
