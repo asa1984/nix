@@ -613,7 +613,8 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - realisation の署名：`require-sigs` のもとで、binary cache の realisation と、信頼されていないクライアントの `RegisterDrvOutput` に、信頼する鍵の署名を要求する（C++ Nix 2.32 はどちらも確かめない）。C++ Nix が署名した realisation を altnix が検証できることを確かめた。
   - `builtin:fetchurl`：daemon の中で実行する（C++ Nix はサンドボックスの中の子プロセス）。nixpkgs の bootstrap files、`unpack`（無圧縮と xz の NAR）、ハッシュの不一致、404 で、出力と失敗の報告が C++ Nix と一致した。
   - `secret-key-files`：ビルドしたパスと realisation に署名する。同じ鍵で C++ Nix と署名がバイト単位で一致した。
-  - 次：stdenv の bootstrap を通しで altnix でビルドして C++ Nix と出力を比べる、builder RPC。
+  - stdenv の bootstrap（完了条件の 1 つ目）：nixpkgs の x86_64-linux の `stdenv`（数百バイトの seed から mes、tinycc、gcc 4.6、gcc 10 を経て gcc 15 に至る minimal-bootstrap）を、ソース以外は substitute せずに altnix だけでビルドした。938 個の出力すべてがビルドでき、934 個は Hydra のビルドとバイト単位で一致した。違った 4 つは、ビルドの日時を埋め込む python と、ビルドするマシンに依存する gcc 4.6（C++ Nix で同じ VM でビルドし直すと altnix と一致した）とそれでビルドされる 2 つ。出力パスは input-addressed なので、どちらでも同じ。途中で、ビルダーが `SIGPIPE` を無視した状態で始まる不具合を見つけて直した。
+  - 次：builder RPC。
 
 ### フェーズ 5：NixOS 統合と移行
 - **作業**
