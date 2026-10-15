@@ -527,6 +527,22 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
 - **出力**：`--json` の形式は C++ Nix と互換にする。ログと進捗の表示は独自でよい。
 - **互換 shim**：`nixos-rebuild`、home-manager、direnv、nix-direnv が呼ぶ範囲で、`nix-build`、`nix-instantiate`、`nix-store` の最小限の shim を用意する（フェーズ 5）。
 
+### 6.9 cargo のビルドを dynamic derivation で（`cargo-dyn`、PoC）
+
+dynamic derivation と builder RPC（`builder-rpc-v0`）を実際の規模で試すため、Rust のプロジェクトを rustc の呼び出しの粒度で derivation にする。対象は altnix 自身。altnix の機能ではなく、汎用の別ツール（PoC の `crates/cargo-dyn`）として作る。
+
+- **planner**：`builder-rpc-v0` を要求し、出力が `.drv`（`outputHashMode = "text"`）の CA derivation。中で cargo を動かし、ビルドのグラフを記録する。
+  - cargo は、`RUSTC_WRAPPER` に指定した `cargo-dyn` を通して rustc を呼ぶ。`cargo-dyn` は rustc を実行せず、引数、作業ディレクトリ、環境変数を記録し、cargo が期待する空の出力を置く。
+  - build script は、コンパイルの代わりに `cargo-dyn` の複製を置く。cargo がそれを実行すると、実行のしかた（`OUT_DIR`、`CARGO_CFG_*` などの環境変数）を記録する。
+  - cargo は本物のビルドと同じ単位を同じ引数で呼ぶので、cargo の依存解決、feature の統合、プロファイルをそのまま使える。altnix-cli では、rustc の呼び出し 100 個と build script の実行 13 個になる。
+- **単位ごとの derivation**：記録した単位を 1 つずつ floating CA の derivation にし、`AddTextToStore` で登録する。builder は `cargo-dyn task`。
+  - cargo の build-dir は単位ごとにディレクトリが分かれている（`<target>/<profile>/build/<package>/<hash>`）。自分のディレクトリは `$out` に、他の単位のディレクトリはその単位の出力の placeholder に置き換える。
+  - パッケージのソースは、パッケージごとの store path にする。vendored crate は `importCargoLock` が crate ごとに作る store path をそのまま使う。workspace のメンバーは、そのディレクトリだけを `AddToStore` で加える。こうして、あるメンバーを変えても他のメンバーの derivation は変わらない。
+  - build script が出力する指示（`rustc-cfg`、`rustc-link-lib`／`rustc-link-search`、`rustc-env`、依存先の build script に渡す `DEP_<LINKS>_<KEY>`）は、ビルドするまで分からない。そのため `cargo-dyn task` が、ビルドの時点で入力の build script の出力を読んで適用する。
+  - 最後に、バイナリを `$out/bin` に置く derivation を作り、planner の出力として `SubmitOutput` する。利用者は `<planner の .drv>^out^out`（`builtins.outputOf`）をビルドする。
+- **builder の安定性**：`cargo-dyn` 自身がすべての単位の builder になる。そのため `cargo-dyn` は自分のクレートと altnix-compat だけからビルドし、他のメンバーの変更で作り直されないようにしている。逆に altnix-compat を変えると、全体のビルドになる。
+- **制約**：cargo の build-dir が単位ごとのディレクトリに分かれた配置（beta の cargo の既定）であることが前提。パイプライン化（依存先の rmeta ができた時点で次を始める）はできない。derivation の出力は、ビルドが終わってから使えるようになるため。
+
 ---
 
 ## 7. 開発フェーズ
@@ -614,7 +630,21 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - `builtin:fetchurl`：daemon の中で実行する（C++ Nix はサンドボックスの中の子プロセス）。nixpkgs の bootstrap files、`unpack`（無圧縮と xz の NAR）、ハッシュの不一致、404 で、出力と失敗の報告が C++ Nix と一致した。
   - `secret-key-files`：ビルドしたパスと realisation に署名する。同じ鍵で C++ Nix と署名がバイト単位で一致した。
   - stdenv の bootstrap（完了条件の 1 つ目）：nixpkgs の x86_64-linux の `stdenv`（数百バイトの seed から mes、tinycc、gcc 4.6、gcc 10 を経て gcc 15 に至る minimal-bootstrap）を、ソース以外は substitute せずに altnix だけでビルドした。938 個の出力すべてがビルドでき、934 個は Hydra のビルドとバイト単位で一致した。違った 4 つは、ビルドの日時を埋め込む python と、ビルドするマシンに依存する gcc 4.6（C++ Nix で同じ VM でビルドし直すと altnix と一致した）とそれでビルドされる 2 つ。出力パスは input-addressed なので、どちらでも同じ。途中で、ビルダーが `SIGPIPE` を無視した状態で始まる不具合を見つけて直した。
-  - builder RPC は、上流の仕様が固まるまで保留してフェーズ 5 に進んだ。
+  - builder RPC：フェーズ 5 の後で、上流の `builder-rpc-v0`（NixOS/nix#15793）に合わせて実装した。この機能を要求する derivation には、ビルドディレクトリに daemon のソケットを置いて `$NIX_REMOTE` で渡す。そこで使える操作は、内容アドレスのオブジェクトの追加（入力の閉包と、それまでに追加したものだけを参照できる）と `SubmitOutput` だけ。
+  - cargo-dyn（§6.9、2026-10-15）：altnix 自身（altnix-cli、rustc の呼び出し 100 個と build script の実行 13 個）を、dynamic derivation として altnix daemon でビルドできた。バイナリの実行時の参照は、`buildRustPackage` と同じく glibc と gcc-lib だけ。4 コアの VM、`-j 4 --cores 4` で、`buildRustPackage`（1 つの derivation で cargo を動かす）と比べた（PoC の `scripts/cargo-dyn-bench`）。
+
+    | 操作 | buildRustPackage | cargo-dyn（ビルドした derivation の数） |
+    |---|---|---|
+    | 最初のビルド | 208.3 s | 272.9 s（116） |
+    | 変更なし | 2.5 s | 1.7 s（0） |
+    | altnix-cli にコメントを追加 | 198.8 s | 86.6 s（2：planner、バイナリ） |
+    | altnix-store にコメントを追加 | 210.5 s | 119.5 s（4：planner、altnix-store、altnix-daemon、バイナリ） |
+    | altnix-heap に関数を追加 | 217.6 s | 121.5 s（4：planner、altnix-heap、altnix-eval、バイナリ） |
+    | altnix-compat にコメントを追加 | 213.2 s | 275.2 s（116。cargo-dyn がこれに依存するので全体） |
+
+    - 変更の後は、変えたクレートとそれに依存するものだけがビルドされる。残りの時間の大半は、バイナリの derivation の fat LTO（`codegen-units = 1`）。
+    - どの変更でも、最後にバイナリを置く derivation の出力は同じパスになった（コメントや使われない関数ではバイナリが変わらない）。CA の early cutoff で、その derivation はビルドされない。
+    - 最初のビルドは cargo より遅い。derivation の出力はビルドが終わってから使えるので、cargo のパイプライン化（依存先の rmeta ができた時点で次を始める）が使えないため。
 
 ### フェーズ 5：NixOS 統合と移行
 - **作業**
