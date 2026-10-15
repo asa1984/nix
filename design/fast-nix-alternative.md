@@ -614,7 +614,7 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - `builtin:fetchurl`：daemon の中で実行する（C++ Nix はサンドボックスの中の子プロセス）。nixpkgs の bootstrap files、`unpack`（無圧縮と xz の NAR）、ハッシュの不一致、404 で、出力と失敗の報告が C++ Nix と一致した。
   - `secret-key-files`：ビルドしたパスと realisation に署名する。同じ鍵で C++ Nix と署名がバイト単位で一致した。
   - stdenv の bootstrap（完了条件の 1 つ目）：nixpkgs の x86_64-linux の `stdenv`（数百バイトの seed から mes、tinycc、gcc 4.6、gcc 10 を経て gcc 15 に至る minimal-bootstrap）を、ソース以外は substitute せずに altnix だけでビルドした。938 個の出力すべてがビルドでき、934 個は Hydra のビルドとバイト単位で一致した。違った 4 つは、ビルドの日時を埋め込む python と、ビルドするマシンに依存する gcc 4.6（C++ Nix で同じ VM でビルドし直すと altnix と一致した）とそれでビルドされる 2 つ。出力パスは input-addressed なので、どちらでも同じ。途中で、ビルダーが `SIGPIPE` を無視した状態で始まる不具合を見つけて直した。
-  - 次：builder RPC。
+  - builder RPC は、上流の仕様が固まるまで保留してフェーズ 5 に進んだ。
 
 ### フェーズ 5：NixOS 統合と移行
 - **作業**
@@ -623,6 +623,12 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - macOS 対応。
 - **完了条件**
   - 実際に利用する NixOS / home-manager の構成を、本ツールだけで日常的に運用できる。
+- **PoC の途中経過（2026-10-15、C++ Nix 2.32.1／2.34.8）**
+  - NixOS モジュール（PoC の `nixos/module.nix`）：`nix-daemon.socket` の後ろのプロセスを `altnix daemon` に替える。`nix.conf`、ビルドユーザー、C++ Nix のコマンドは NixOS の設定のままにし、altnix が自前でビルドしないもの（`builtin:buildenv` など）は C++ Nix の `nix-daemon` に任せる。root の操作も daemon を通るよう、セッションに `NIX_REMOTE=daemon` を設定する。
+  - daemon を実際の NixOS で動かすために足したもの：systemd のソケット起動、読み取り専用でマウントされたストアを自分のマウント名前空間で書き込み可能にし直すこと（C++ Nix の `makeStoreWritable`）、ビルドユーザー（`build-users-group`。ロックは C++ Nix と同じ `userpool` のファイル）。ビルドユーザーがなかった間は、root の daemon ではビルダーがホストの root で動いていた。
+  - 互換 shim：`altnix` を `nix-build`、`nix-instantiate`、`nix` という名前で起動すると、評価とビルドの依頼（`result` の symlink と GC root を含む）を自分で行い、それ以外は C++ Nix の同じコマンドに渡す。nixos-rebuild-ng は依存の `nix` の bin を `PATH` の先頭に置くので、モジュールでは `nix.package` をこの 3 つだけ差し替えたものにする。最小構成の NixOS の `nixos-rebuild build` は、shim 経由でも C++ Nix と同じ toplevel になり、ビルド済みの状態では eval cache で 7.6 s から 0.25 s になった（構成を変えると評価し直す）。
+  - NixOS VM での確認（PoC の `scripts/vm-check`。KVM がないので QEMU の TCG）：C++ Nix の CLI から altnix daemon に対して、root と一般ユーザーのビルド、ビルドユーザーでの実行、`nix-env -i`（`builtin:buildenv`）、`nix profile add`、GC が通る。shim を有効にした VM の中で `nixos-rebuild switch` も通った（評価は altnix、cache.nixos.org からの substitute 63 パスと 84 個のビルドは altnix daemon、切り替えは NixOS の `switch-to-configuration`）。
+  - 残り：home-manager と nix-direnv の実物での確認、`--stdio`（ssh-ng）と `BuildDerivation`（remote build）、`builtin:buildenv` を自前で行うこと、macOS。日常の運用（完了条件）は、実機の NixOS がないこの環境では確かめられない。
 
 ---
 
