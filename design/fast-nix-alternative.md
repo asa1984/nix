@@ -612,7 +612,8 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - nix-ninja：Nix の外で動かす形（コンパイル単位ごとに CA の derivation を `nix derivation add` してビルドする）で、zstd（コンパイル単位 44 個）を altnix daemon でビルドし、インクリメンタルビルドを確かめた。ソースを 1 つ変えるとそのコンパイル単位とリンクだけ、コメントだけの変更ではそのコンパイル単位だけがビルドされ（CA の early cutoff）、ビルド数も時間も C++ Nix と同程度（最初のビルド 61.0 s 対 59.2 s、コメントの変更 8.8 s 対 10.2 s）。early cutoff には、nix-ninja が入力の一覧を placeholder の順に並べるのを直す必要があった（nix-ninja 側の問題で、C++ Nix でも同じ）。nix-ninja を derivation の中で動かす形は、recursive-nix（altnix は C++ Nix に任せる）か、最新版の builder RPC が要る。
   - realisation の署名：`require-sigs` のもとで、binary cache の realisation と、信頼されていないクライアントの `RegisterDrvOutput` に、信頼する鍵の署名を要求する（C++ Nix 2.32 はどちらも確かめない）。C++ Nix が署名した realisation を altnix が検証できることを確かめた。
   - `builtin:fetchurl`：daemon の中で実行する（C++ Nix はサンドボックスの中の子プロセス）。nixpkgs の bootstrap files、`unpack`（無圧縮と xz の NAR）、ハッシュの不一致、404 で、出力と失敗の報告が C++ Nix と一致した。
-  - 次：builder RPC、`secret-key-files`（ビルドしたパスと realisation への署名）、stdenv の bootstrap を通しで altnix でビルドして C++ Nix と出力を比べる。
+  - `secret-key-files`：ビルドしたパスと realisation に署名する。同じ鍵で C++ Nix と署名がバイト単位で一致した。
+  - 次：stdenv の bootstrap を通しで altnix でビルドして C++ Nix と出力を比べる、builder RPC。
 
 ### フェーズ 5：NixOS 統合と移行
 - **作業**
