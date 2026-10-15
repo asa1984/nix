@@ -203,6 +203,16 @@ C++ Nix 側の CA 安定化マイルストーン（#35）は 71%、dynamic deriv
 
 **設計原則として、グローバル状態を持たない。** 設定はすべて明示的な `Context` / `Settings` 値として渡す（C++ Nix の §2.2 にある、グローバル設定への参照が約 365 箇所ある問題の回避）。
 
+### 5.3 実装の共通方針
+
+- **汎用の処理には広く使われている crate を使い、互換の形式は自前で持つ。**
+  - 使うもの（PoC で導入済み）：コマンドラインの解析（clap）、ログとトレース（tracing）、シリアライズ（serde）、SQLite（rusqlite）、HTTP（ureq）、暗号（ring）、圧縮。
+  - 自前で持つもの：C++ Nix とバイト単位で一致させる形式（NAR、ATerm、store path、worker protocol、narinfo）。ここは C++ Nix の挙動に合わせて細部を決める必要があり、汎用の crate の流儀とぶつかるため（PoC の `altnix-compat`。`nix-compat` を使うかどうかは §11 Q1）。
+  - 入れないもの：async ランタイム（§6.6.1）、gRPC（Nix の通信はすべて独自の形式で、置き換えられない。新しいプロトコルを作るときに改めて判断する）、評価器への rayon（`&mut Vm` の貸し出しと GC のセーフポイントに合わない。PoC の `docs/parallel.md`）。
+- **コマンドライン**：本ツール独自のコマンド（daemon、`eval-jobs`、flake の操作など）は clap で定義する。C++ Nix のコマンドの代わりに動くもの（互換 shim、`nix-build` 相当、`nix-instantiate` 相当）は、C++ Nix のフラグの解釈とエラーの文面に合わせ、知らないフラグを C++ Nix に渡すため、手書きの解析を残す。
+- **ログ**：本ツール自身のログは構造化したトレース（span と event）にし、操作、ビルド、resolve、substitute の所要時間を後から見られるようにする。クライアントに返すログ（worker protocol の `STDERR_*`）と `--log-format` の出力は C++ Nix と同じ形式のままにし、トレースとは分ける。評価器の実行経路には計装を置かない。
+- **エラー**：規約を検討中。いまの原則は、評価器ではエラーを値として返し表示時に整形する（§6.1）、scheduler と builder ではエラーを型で扱い `abort` や `assert` で落ちない（§6.6.1）、の 2 つ。
+
 ---
 
 ## 6. コンポーネント設計
@@ -469,9 +479,12 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - `QueryTrace(drv, out)`
   - `Materialize(DerivedPath)`
   - dynamic derivation では、`Build` の結果から新しい `Materialize` ノードが生まれる。
-- **async ランタイム上のタスクとして実装する。**
-  - ジョブ数の上限（ビルド、ダウンロード、CPU）は、セマフォで個別に管理する。
-  - 出力の登録は別スレッドで行い、ログ処理を止めない。
+- **OS のスレッドで実装する（async ランタイムは使わない）。** 当初は async ランタイム上のタスクにする案だったが、PoC で次のことが分かったので改めた。
+  - ビルドは外部プロセスで、待つのはその終了とログの読み取り。1 つのクライアントの接続は逐次的な状態機械で、daemon が同時に抱える接続も多くない。スレッドで足りる（substitute の B7 も C++ Nix を上回った）。
+  - async にすると、サンドボックスの fork と exec、worker protocol のフレームの読み書きなど、壊れやすい箇所が増える。
+  - ジョブ数の上限（ビルド、ダウンロード）は、それぞれ別に数える（ローカルのビルドの枠、リモートのマシンの枠、`http-connections` のダウンロードのスレッド）。
+  - 出力の登録は別のステップで、まとめて行う（substitute は参照がそろった順に 1 回のトランザクションで登録する）。
+  - 非同期を入れる候補は HTTP/2（同じ接続で `.narinfo` をまとめて問い合わせる）。そのときは HTTP の層だけにする。
 - **`--check`、`--repair`、remote build は別のノード種別として表現する。** goal の中のフラグで分岐させない（上流 #12628 の反省）。
 - **エラーは型で扱う。** `abort` や `assert` で落ちる経路を作らない。resolve の失敗は理由を保持して伝える。
 
@@ -540,7 +553,7 @@ dynamic derivation と builder RPC（`builder-rpc-v0`）を実際の規模で試
   - パッケージのソースは、パッケージごとの store path にする。vendored crate は `importCargoLock` が crate ごとに作る store path をそのまま使う。workspace のメンバーは、そのディレクトリだけを `AddToStore` で加える。こうして、あるメンバーを変えても他のメンバーの derivation は変わらない。
   - build script が出力する指示（`rustc-cfg`、`rustc-link-lib`／`rustc-link-search`、`rustc-env`、依存先の build script に渡す `DEP_<LINKS>_<KEY>`）は、ビルドするまで分からない。そのため `cargo-dyn-task` が、ビルドの時点で入力の build script の出力を読んで適用する。
   - 最後に、バイナリを `$out/bin` に置く derivation を作り、planner の出力として `SubmitOutput` する。利用者は `<planner の .drv>^out^out`（`builtins.outputOf`）をビルドする。
-- **builder の安定性**：単位の builder（`cargo-dyn-task`）は、すべての単位の derivation の一部になる。そのため planner（`cargo-dyn`）とは別の crate にし、serde_json だけに依存させ、自分の crate（と workspace の `Cargo.toml`、`Cargo.lock`）だけからビルドする。planner や altnix-compat を変えても、単位の derivation は変わらない。
+- **builder の安定性**：単位の builder（`cargo-dyn-task`）は、すべての単位の derivation の一部になる。そのため planner（`cargo-dyn`）とは別の crate にし、serde（と serde_json）だけに依存させ、自分の crate（と workspace の `Cargo.toml`、`Cargo.lock`）だけからビルドする。planner や altnix-compat を変えても、単位の derivation は変わらない。
   - 最初の版は planner と builder が同じバイナリだった。そのため altnix-compat（planner が依存する）を変えると、全体のビルドになっていた。
 - **GC**：builder RPC で追加したパスは、ビルドが終わるまでそのビルドのセッションで temporary root にする（ソケットの接続はビルドより先に閉じることがある）。提出された出力は、ビルドを頼んだクライアントのセッションに移す。
 - **制約**：cargo の build-dir が単位ごとのディレクトリに分かれた配置（beta の cargo の既定）であることが前提。パイプライン化（依存先の rmeta ができた時点で次を始める）はできない。derivation の出力は、ビルドが終わってから使えるようになるため。
