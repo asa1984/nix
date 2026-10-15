@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 |---|---|
 | ステータス | Draft |
-| 最終更新 | 2026-10-01 |
+| 最終更新 | 2026-10-15 |
 | 対象 | 本ツールの設計・実装に関わる開発者 |
 | 前提とした Nix | NixOS/nix master（2.36.0 dev, `209d2bc`） |
 
@@ -183,23 +183,24 @@ C++ Nix 側の CA 安定化マイルストーン（#35）は 71%、dynamic deriv
 
 - **実装言語は Rust を推奨する。** メモリ安全性、並列化のしやすさ、既存資産の多さが理由。
 - **形式まわりは既存実装を流用する。** [snix](https://git.snix.dev/snix/snix) の `nix-compat` crate（NAR、narinfo、ATerm、store path、wire protocol など）の採用を第一候補とする。フェーズ 0 で、どこまで網羅しているか、ライセンス（GPL-3.0）が許容できるか、API が安定しているかを評価する（§11 Q1）。
+  - PoC では採用せず、自前で実装した（`altnix-compat`）。C++ Nix とバイト単位で合わせる細部を、自分で決める必要があったため（§5.3）。
 - **評価器は自前で設計する。** 理由は2つ。
   - 並列評価、GC、string context の表現が性能の核であり、ここに設計の自由度が必要。
   - snix-eval、[fix](https://github.com/psyclyx/fix)（Zig）、C++ Nix の設計は参考にする。
 
 ### 5.2 crate 構成（案）
 
-| crate | 責務 |
-|---|---|
-| `tool-compat` | 形式・ハッシュ・パス（`nix-compat` を包むか、流用する） |
-| `tool-eval` | パーサ、コンパイラ、VM、builtins、drv の生成 |
-| `tool-source` | `SourceAccessor`、fetcher（git、tarball、github など）、fingerprint キャッシュ |
-| `tool-flake` | lock の計算、レジストリ、`call-flake` 相当 |
-| `tool-eval-cache` | 属性単位の評価結果キャッシュ |
-| `tool-store` | `Store` trait、ローカルストア、リモートストア、binary cache クライアント |
-| `tool-build` | scheduler、builder、sandbox、build trace |
-| `tool-daemon` | daemon 本体（worker protocol の互換層と新プロトコル） |
-| `tool-cli` | CLI |
+| crate | 責務 | PoC での対応 |
+|---|---|---|
+| `tool-compat` | 形式・ハッシュ・パス（`nix-compat` を包むか、流用する） | `altnix-compat` |
+| `tool-eval` | パーサ、コンパイラ、VM、builtins、drv の生成 | `altnix-eval`、`altnix-heap`（GC ヒープと値の表現） |
+| `tool-source` | `SourceAccessor`、fetcher（git、tarball、github など）、fingerprint キャッシュ | `altnix-fetch`、`altnix-eval` の `fetch.rs` と `source.rs` |
+| `tool-flake` | lock の計算、レジストリ、`call-flake` 相当 | `altnix-eval` の `flake.rs`、`altnix-compat` の `lockfile.rs` と `registry.rs` |
+| `tool-eval-cache` | 属性単位の評価結果キャッシュ | `altnix-eval` の `deps.rs` と `depgraph.rs`、`altnix-cli` の `evalcache.rs` と `jobcache.rs` |
+| `tool-store` | `Store` trait、ローカルストア、リモートストア、binary cache クライアント | `altnix-store`（daemon のクライアントとローカルストア）。binary cache のクライアントは `altnix-daemon` |
+| `tool-build` | scheduler、builder、sandbox、build trace | `altnix-daemon` の `build`、`altnix-sandbox` |
+| `tool-daemon` | daemon 本体（worker protocol の互換層と新プロトコル） | `altnix-daemon` |
+| `tool-cli` | CLI | `altnix-cli` |
 
 **設計原則として、グローバル状態を持たない。** 設定はすべて明示的な `Context` / `Settings` 値として渡す（C++ Nix の §2.2 にある、グローバル設定への参照が約 365 箇所ある問題の回避）。
 
@@ -427,7 +428,7 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
 ### 6.5 ストアと daemon（`tool-store` / `tool-daemon`）
 
 #### 6.5.1 `Store` trait
-- **非同期 API を基本にする。** 同期 API は薄いラッパーにとどめる（C++ Nix は呼び出しのたびに promise/future で包んでいる）。
+- **同期 API にし、並行性はスレッドで得る**（§5.3、§6.6.1）。C++ Nix のように、呼び出しのたびに promise/future で包むことはしない。
 - **一括で扱う API を一級市民にする**：`query_path_infos(&[StorePath])`、`query_build_traces(&[DrvOutput])` など。
 - **キャッシュ**：path info を LRU でキャッシュし、「存在する」「存在しない」の両方を記録する。
 
@@ -494,6 +495,7 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
   - 非同期を入れる候補は HTTP/2（同じ接続で `.narinfo` をまとめて問い合わせる）。そのときは HTTP の層だけにする。
 - **`--check`、`--repair`、remote build は別のノード種別として表現する。** goal の中のフラグで分岐させない（上流 #12628 の反省）。
 - **エラーは型で扱う。** `abort` や `assert` で落ちる経路を作らない。resolve の失敗は理由を保持して伝える。
+- **PoC での実装**：C++ Nix の `Worker` と同じく、derivation ごとの goal（入力待ち、ビルド、resolve 待ち）で動かした。上のノードの種類への分解はまだで、substitute は goal の中で行い、`--check` と `--repair`（build mode が 0 以外）は C++ Nix に任せている（フェーズ 4 の途中経過）。
 
 #### 6.6.2 builder
 - **Linux のサンドボックス**：
@@ -537,6 +539,7 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
 
 #### 6.7.5 キャッシュとの互換
 - **binary cache の build trace**：C++ Nix の配置（`build-trace-v2/<drvPath>/<out>.doi`）を読み書きできるようにする。
+  - この配置は C++ Nix 2.35 から（`rl-2.35.md`）。2.34 までは `realisations/<hash>!<out>.doi` で、resolve 前の derivation のエントリも持つ。PoC は 2.32 の `realisations/` だけを読む。
 - **build trace の endpoint を持たないキャッシュ**：一般的な S3/HTTP キャッシュなど。これらは「存在しない」として扱い、エラーにしない。
 - **`queryMissing` / `--dry-run` 相当**：DAG を実行せずに走らせる「計画モード」として実装する。dynamic derivation も、得られる範囲で見積もりに含める。
 
@@ -571,7 +574,7 @@ dynamic derivation と builder RPC（`builder-rpc-v0`）を実際の規模で試
 
 各フェーズは、それ単体で利用価値がある状態で終える。途中で止まっても成果が残るようにするため。
 
-**順序の変更（PoC の段階で決定）**：フェーズ 2 の後、フェーズ 3 より先に、フェーズ 4 のうち dynamic derivation の scheduler とshallow resolve（§6.7.3）を、既存の `nix-daemon` の上で試す（下の「フェーズ 2.5」）。
+**順序の変更（PoC の段階で決定）**：フェーズ 2 の後、フェーズ 3 より先に、フェーズ 4 のうち dynamic derivation の scheduler と shallow resolve（§6.7.3）を、既存の `nix-daemon` の上で試す（下の「フェーズ 2.5」）。
 
 - 理由：本ツールの差別化の中心は G4 で、その成否はまだ確かめていない。フェーズ 3（ストア、daemon、substituter）は量が多いが手本となる実装があり、不確実性が低い。動的な DAG の scheduler は実装例が少なく、評価器とストアの接点（IFD、`builtins.outputOf`、評価中のビルド）への要求もここで分かる。
 - 評価器の性能（1 スレッドの定数倍、NixOS の投機的な並列化）は、この時点では後回しにする。並列化とキャッシュで、§9 の B1・B5 の改善はすでに示せている。
@@ -617,7 +620,7 @@ dynamic derivation と builder RPC（`builder-rpc-v0`）を実際の規模で試
   - 評価器：`tests/functional/dyn-drv` の式の drvPath と出力パス（または placeholder）が C++ Nix と一致した。動的な入力を持つ derivation を deferred にする規則は 2.32.1 になく、2026-03 以降の master にあるので、こちらは master に合わせた。
   - scheduler：動的な入力を持つ derivation は altnix が依存の深さごとに展開して resolve し、daemon には入力が静的な derivation のビルドだけを頼む。resolve 後の `.drv` のパスは daemon 自身の resolve と一致し、`dep-built-drv`、`build-built-drv`、`dep-built-drv-2`、`failing-outer` の 4 シナリオが 2.32.1 の daemon で通り、出力パスも C++ Nix のビルドと一致した。
   - nix-ninja（recursive-nix を使う最後のコミット）の `example-hello`：評価結果は C++ Nix と一致し、評価は 3.2 秒（C++ Nix 16.9 秒）。生成のステップとコンパイル単位の derivation は通ったが、リンクのステップで nix-ninja-task が失敗する。C++ Nix でも同じ resolved drv が同じエラーで失敗するので、nix-ninja と手元の Nix のバージョンの組み合わせの問題で、インクリメンタルビルドの確認は持ち越し。最新の nix-ninja は master の Nix にしかない `builder-rpc-v0` を要求するので、次は master の daemon で試す。
-  - 残り：shallow resolve（いまは入力をすべてビルドしてから resolve する）と build trace の永続化。既存の daemon の上では、CA の出力の realisation の照会（`QueryRealisation`）でshallow resolve の一部を試せる。
+  - このとき残った shallow resolve と build trace の永続化は、フェーズ 4 で altnix daemon に実装した（下のフェーズ 4 の途中経過）。
 
 ### フェーズ 3：ストア、daemon、substituter
 - **作業**
@@ -631,7 +634,7 @@ dynamic derivation と builder RPC（`builder-rpc-v0`）を実際の規模で試
   - `nix` CLI：chroot ストアの上で、`nix store info`、`nix-store -r`、`--add`、`nix store add-file`／`add-path`／`cat`／`verify`、`nix-instantiate` とビルド、`nix build -f nixpkgs hello`、`nix copy`、`nix-store --gc`（root と他プロセスの temporary root を守る）が通る（PoC の `scripts/daemon-check`、12 項目）。`nixos-rebuild build` も通り（最小構成にキャッシュにないファイルを足し、472 パスの substitute と約 100 個のビルド）、toplevel のパスは C++ Nix の daemon での結果と一致した。時間は 49〜50 s（C++ Nix 78〜82 s）。`switch` は、NixOS で試せる環境がないので未確認。
   - G6：altnix daemon が使ったストアを C++ Nix が直接開いて、`--verify --check-contents`、照会、GC が通り、また altnix に戻せる。substitute した 84 パスのメタデータは、C++ Nix が同じものを substitute した結果と完全に一致した。
   - B7：git の閉包（84 パス、ダウンロード 128 MiB）を空のストアに取得する時間は、cache.nixos.org から 3.03 s（C++ Nix 5.84 s、どちらも 5 回の中央値、`.narinfo` のキャッシュなし）、ローカルの `file://` キャッシュから 1.23〜1.30 s（C++ Nix 1.61〜1.78 s）。基準値を上回った。数千パスの閉包での測定はディスクの空きが足りず、まだ（上の NixOS 最小構成は 609 パス）。
-  - 残り：本物の NixOS での `nixos-rebuild switch`、新しいプロトコル、`--stdio`（ssh-ng）、optimise、HTTP/2。
+  - 残り：新しいプロトコル、optimise、HTTP/2。本物の NixOS での `nixos-rebuild switch` と `--stdio`（ssh-ng）は、フェーズ 5 で確かめた（VM での `switch`、`altnix daemon --stdio`）。
 
 ### フェーズ 4：scheduler、builder、CA、dynamic derivation
 - **作業**
@@ -697,7 +700,7 @@ dynamic derivation と builder RPC（`builder-rpc-v0`）を実際の規模で試
   - NixOS VM での確認（PoC の `scripts/vm-check`。KVM がないので QEMU の TCG）：C++ Nix の CLI から altnix daemon に対して、root と一般ユーザーのビルド、ビルドユーザーでの実行、`nix-env -i`（`builtin:buildenv`）、`nix profile add`、GC が通る。shim を有効にした VM の中で `nixos-rebuild switch` も通った（評価は altnix、cache.nixos.org からの substitute 63 パスと 84 個のビルドは altnix daemon、切り替えは NixOS の `switch-to-configuration`）。
   - home-manager：nixpkgs の home-manager の `home-manager build` も shim 経由で通り、`activationPackage` が C++ Nix の評価と同じパスになった。
   - リモートビルド：`altnix daemon --stdio`（ssh-ng の相手側）と `BuildDerivation` を altnix 自身で扱い、C++ Nix の build hook が altnix をビルドマシンとして使える。逆に altnix daemon が `builders` に従ってビルドを振り分け（C++ Nix の `build-remote.cc` に当たる。マシンの選び方も同じ）、相手が altnix でも C++ Nix でも、入力アドレスと CA の derivation の出力が C++ Nix のローカルのビルドと一致した。`ssh://`（`nix-store --serve`）のマシンはまだ。
-  - 残り：nix-direnv の実物での確認（`nix print-dev-env` などは C++ Nix に渡る）、`builtin:buildenv` を自前で行うこと、`ssh://` のビルドマシン、macOS。日常の運用（完了条件）は、実機の NixOS がないこの環境では確かめられない。
+  - 残り：nix-direnv の実物での確認（`nix print-dev-env` などは C++ Nix に渡る）、`builtin:buildenv` を自前で行うこと、macOS。`ssh://`（serve protocol）のビルドマシンは非ゴール（§3.2）なので扱わない。日常の運用（完了条件）は、実機の NixOS がないこの環境では確かめられない。
 
 ---
 
@@ -754,14 +757,14 @@ dynamic derivation と builder RPC（`builder-rpc-v0`）を実際の規模で試
 
 | ID | 論点 | 選択肢 / 現時点の考え |
 |---|---|---|
-| Q1 | `nix-compat` を採用するか（機能の網羅性、GPL-3.0、API の安定性） | 採用 / fork / 自前実装。網羅性とライセンスを評価してから決める |
-| Q2 | worker protocol の互換範囲の下限 | 1.30 以上（ネストした `DerivedPath`）を目安。build trace のキー変更（`realisation-with-path-not-hash`）に対応するかどうか |
+| Q1 | `nix-compat` を採用するか（機能の網羅性、GPL-3.0、API の安定性） | 採用 / fork / 自前実装。網羅性とライセンスを評価してから決める。PoC は自前実装（`altnix-compat`）で、§4.1 の形式を C++ Nix と合わせられた |
+| Q2 | worker protocol の互換範囲の下限 | 1.30 以上（ネストした `DerivedPath`）を目安。build trace のキー変更（`realisation-with-path-not-hash`）に対応するかどうか。PoC はサーバーとして 1.18 以上のクライアントを受け付け、1.38 を話す（C++ Nix 2.32 と同じ） |
 | Q3 | `<nixpkgs>` 互換モードを用意するか | 既定では無効。オプトインでレジストリに解決 |
 | Q4 | バイトコードをディスクにキャッシュするか | 効果を測ってから決める（パースとコンパイルの時間が占める割合しだい） |
 | Q5 | 投機的な並列評価をどこまで行うか | まずは明示的な並列（複数の installable、flake check、全属性評価）から |
-| Q6 | git の実装（libgit2 / gitoxide / `git` CLI） | 認証ヘルパーと LFS への対応が論点 |
+| Q6 | git の実装（libgit2 / gitoxide / `git` CLI） | 認証ヘルパーと LFS への対応が論点。PoC は `git` CLI を使う（認証は git の設定に任せられる） |
 | Q7 | ローカルストア DB のスキーマ（案 A：互換 / 案 B：独自） | 案 A から始める |
-| Q8 | recursive-nix と builder RPC のどちらの方式に対応するか | nix-ninja など実際の利用者が必要とする方式を優先する |
+| Q8 | recursive-nix と builder RPC のどちらの方式に対応するか | nix-ninja など実際の利用者が必要とする方式を優先する。PoC は builder RPC（`builder-rpc-v0`）を実装し、recursive-nix の derivation は C++ Nix に任せる。最新の nix-ninja は builder RPC を使う |
 | Q9 | Darwin 対応の優先度 | フェーズ 5 以降 |
 | Q10 | 名前、ライセンス、ガバナンス | 未定 |
 | Q11 | 評価結果の互換の対象とする C++ Nix のバージョン | nixpkgs が要求する最低バージョン（2.18）か、最新版か。masked hash の衝突時の挙動（`b26204ba1`）のように、バージョンによって drv path が変わる変更がある |
