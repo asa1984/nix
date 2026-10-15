@@ -384,6 +384,8 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
 - **ルート flake の `outPath` と `narHash` を遅延させる。**
   - ルート flake には lock file による narHash の検証が不要。そこで `self.outPath` を thunk にし、触られたときだけツリー全体をハッシュする。
   - `nix build .#foo` で `self` を derivation の `src` に使う場合は結局必要になる。それでも、評価だけのコマンドや eval cache がヒットしたときは、全体ハッシュを省略できる。
+  - `self.outPath` を遅らせるだけでは足りない。モジュールシステムはモジュールのパスを文字列にしてキーにする（`lib/modules.nix` の `key` と `_file`）ので、nixpkgs の `hello` の評価でもルートのパスが文字列になる。そこで C++ Nix の lazy trees と同じく、木を仮のストアパス（本物と同じ長さと名前で、ハッシュ部分だけが違う）に mount し、パスを文字列にしたものも仮のパスのまま持つ。本物のパスに置き換えるのは、評価の外に出るところとハッシュ部分で結果が変わるところに限る：derivation と `toFile`、ルートを名前にするコピー、`outPath` と `narHash`、fetcher と `storePath` と `hashString` に渡すもの、出力とメッセージ、仮のハッシュ部分で結果が変わる比較（等しさと並び順）。
+  - ハッシュしない代わりに、eval cache の依存には作業ツリーの状態（`HEAD` と dirty かどうか）を記録する。dirty かどうかは属性（`rev` と `dirtyRev` のどちらがあるか）を変える。
 - **lock の計算**：
   - lock file が存在し、`flake.nix` の inputs 宣言が変わっていなければ、lock の再計算を省略する。
   - 変わっていれば、差分だけ再計算する。
@@ -394,11 +396,12 @@ Perceus（Reinking, Xie, de Moura, Leijen, PLDI 2021。Koka で採用し、Lean 
 - **レジストリ**：グローバル、ユーザー、flake ごとのレジストリをサポートする。lookup はハッシュマップで行う。
 - **legacy との接続**：`<nixpkgs>` 形式は既定では無効にする。オプトインで「レジストリの flake の `outPath`」に解決する互換モードを用意する（§11 Q3）。
 
-- **PoC での実装（評価器の `flake.rs`）**：`readFlake`、`lockFlake`（`computeLocks`）、`callFlake` は C++ Nix を移植し、`call-flake.nix` はそのまま埋め込んだ。まず出力の一致を優先し、上の遅延化（`self.outPath`、入力の `outputs`）はまだ行っていない。
+- **PoC での実装（評価器の `flake.rs`）**：`readFlake`、`lockFlake`（`computeLocks`）、`callFlake` は C++ Nix を移植し、`call-flake.nix` はそのまま埋め込んだ。ルート flake の遅延（上の 3 つ目の項目、評価器の `lazytree.rs`）は 2026-10-15 に入れた。`call-flake.nix` は、仮のストアパスの木の `flake.nix` を文字列ではなくパスで import するよう 1 行だけ変えた。入力の `outputs` を強制しない変更はまだ。
   - lock file の作成と更新（全体、一部の入力、入力の変更と削除）で、書かれる lock file はバイト単位で、差分の表示も C++ Nix と一致した。
   - C++ Nix の挙動で合わせる必要があったもの：入力の取得はプロセスごとに一度（`InputCache`）、Git の作業ツリーの状態もプロセスごとに一度（`getCachedWorkdirInfo`。lock file を書いた後に読み直しても dirty にならない）、`--override-input` では lock file を書かない。
   - 実物の flake（home-manager、32 ノードの NixOS 構成の flake）で、lock file、drvPath（option の JSON、IFD を含むテスト集合）、`nixConfig` の警告が C++ Nix と一致した。過程で見つかった不一致は、mount した木のファイルの位置（C++ Nix は store path で示す）と、名前の違うソースのコピーの取り違えだった。
-  - §9 の指標：B4（nixpkgs を Git の flake にして 1 ファイル変更後の評価）は 3.2 s 対 14.0 s、B5 は 0.7 s 対 1.7〜2.3 s、B6（入力 61 個の lock）は 14 ms 対 100 ms。C++ Nix 2.32 は Git の作業ツリーを毎回ストアにコピーする。無関係なファイルの変更でも評価し直すのは、ルート flake の narHash を木全体から計算しているため（上の「遅延させる」は未実装）。
+  - §9 の指標：B4（nixpkgs を Git の flake にして 1 ファイル変更後の評価）は 0.68 s 対 14.0 s（ルート flake の遅延の前は 3.2 s）、B5 は 0.16 s 対 1.7〜2.3 s、B6（入力 61 個の lock）は 14 ms 対 100 ms。C++ Nix 2.32 は Git の作業ツリーを毎回ストアにコピーする。dirty な木で無関係なファイルを変えたときは eval cache が当たり、0.17 s（遅延の前は木全体のハッシュが依存になっていて 4.4 s）。
+  - ルート flake の遅延の確認：C++ Nix 2.32.1 と比べた 28 項目（`toString ./.`、`"${./.}"`、`outPath`、`narHash`、本物のパスとの比較と並べ替え、`hashString`、`toFile`、derivation、`filterSource`、位置）とビルドの出力パスが、Git と `path:` の両方で一致した。扱っていないのは、仮のパスを含む文字列を属性名にしたときの他のストアパスとの並び順と、ハッシュ部分の途中を切り出す操作（`substring`）。
   - モジュールシステムが中心の評価（home-manager のテスト集合）は、altnix が 25% 遅い。評価器の 1 スレッドの性能の課題（§6.1.3 の NixOS と同じ）。
   - レジストリ（`altnix-compat` の `registry.rs`）：C++ Nix と同じく、`--override-flake`、ユーザー、システム、グローバルの順に引き、flake の入力と `fetchTree` ではユーザーとシステムのものを使わない。flake ごとのレジストリはまだない。レジストリのファイルは eval cache の依存として記録する。ローカルのレジストリで、lock file、評価結果、エラーの文面が C++ Nix 2.32.1 と一致した。
 
