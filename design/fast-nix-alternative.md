@@ -535,12 +535,14 @@ dynamic derivation と builder RPC（`builder-rpc-v0`）を実際の規模で試
   - cargo は、`RUSTC_WRAPPER` に指定した `cargo-dyn` を通して rustc を呼ぶ。`cargo-dyn` は rustc を実行せず、引数、作業ディレクトリ、環境変数を記録し、cargo が期待する空の出力を置く。
   - build script は、コンパイルの代わりに `cargo-dyn` の複製を置く。cargo がそれを実行すると、実行のしかた（`OUT_DIR`、`CARGO_CFG_*` などの環境変数）を記録する。
   - cargo は本物のビルドと同じ単位を同じ引数で呼ぶので、cargo の依存解決、feature の統合、プロファイルをそのまま使える。altnix-cli では、rustc の呼び出し 100 個と build script の実行 13 個になる。
-- **単位ごとの derivation**：記録した単位を 1 つずつ floating CA の derivation にし、`AddTextToStore` で登録する。builder は `cargo-dyn task`。
+- **単位ごとの derivation**：記録した単位を 1 つずつ floating CA の derivation にし、`AddTextToStore` で登録する。builder は `cargo-dyn-task`。
   - cargo の build-dir は単位ごとにディレクトリが分かれている（`<target>/<profile>/build/<package>/<hash>`）。自分のディレクトリは `$out` に、他の単位のディレクトリはその単位の出力の placeholder に置き換える。
   - パッケージのソースは、パッケージごとの store path にする。vendored crate は `importCargoLock` が crate ごとに作る store path をそのまま使う。workspace のメンバーは、そのディレクトリだけを `AddToStore` で加える。こうして、あるメンバーを変えても他のメンバーの derivation は変わらない。
-  - build script が出力する指示（`rustc-cfg`、`rustc-link-lib`／`rustc-link-search`、`rustc-env`、依存先の build script に渡す `DEP_<LINKS>_<KEY>`）は、ビルドするまで分からない。そのため `cargo-dyn task` が、ビルドの時点で入力の build script の出力を読んで適用する。
+  - build script が出力する指示（`rustc-cfg`、`rustc-link-lib`／`rustc-link-search`、`rustc-env`、依存先の build script に渡す `DEP_<LINKS>_<KEY>`）は、ビルドするまで分からない。そのため `cargo-dyn-task` が、ビルドの時点で入力の build script の出力を読んで適用する。
   - 最後に、バイナリを `$out/bin` に置く derivation を作り、planner の出力として `SubmitOutput` する。利用者は `<planner の .drv>^out^out`（`builtins.outputOf`）をビルドする。
-- **builder の安定性**：`cargo-dyn` 自身がすべての単位の builder になる。そのため `cargo-dyn` は自分のクレートと altnix-compat だけからビルドし、他のメンバーの変更で作り直されないようにしている。逆に altnix-compat を変えると、全体のビルドになる。
+- **builder の安定性**：単位の builder（`cargo-dyn-task`）は、すべての単位の derivation の一部になる。そのため planner（`cargo-dyn`）とは別の crate にし、serde_json だけに依存させ、自分の crate（と workspace の `Cargo.toml`、`Cargo.lock`）だけからビルドする。planner や altnix-compat を変えても、単位の derivation は変わらない。
+  - 最初の版は planner と builder が同じバイナリだった。そのため altnix-compat（planner が依存する）を変えると、全体のビルドになっていた。
+- **GC**：builder RPC で追加したパスは、ビルドが終わるまでそのビルドのセッションで temporary root にする（ソケットの接続はビルドより先に閉じることがある）。提出された出力は、ビルドを頼んだクライアントのセッションに移す。
 - **制約**：cargo の build-dir が単位ごとのディレクトリに分かれた配置（beta の cargo の既定）であることが前提。パイプライン化（依存先の rmeta ができた時点で次を始める）はできない。derivation の出力は、ビルドが終わってから使えるようになるため。
 
 ---
@@ -640,7 +642,7 @@ dynamic derivation と builder RPC（`builder-rpc-v0`）を実際の規模で試
     | altnix-cli にコメントを追加 | 198.8 s | 86.6 s（2：planner、バイナリ） |
     | altnix-store にコメントを追加 | 210.5 s | 119.5 s（4：planner、altnix-store、altnix-daemon、バイナリ） |
     | altnix-heap に関数を追加 | 217.6 s | 121.5 s（4：planner、altnix-heap、altnix-eval、バイナリ） |
-    | altnix-compat にコメントを追加 | 213.2 s | 275.2 s（116。cargo-dyn がこれに依存するので全体） |
+    | altnix-compat にコメントを追加 | 213.2 s | 275.2 s（116。このときは単位の builder が planner と同じバイナリで、altnix-compat に依存していたので全体） |
 
     - 変更の後は、変えたクレートとそれに依存するものだけがビルドされる。残りの時間の大半は、バイナリの derivation の fat LTO（`codegen-units = 1`）。
     - どの変更でも、最後にバイナリを置く derivation の出力は同じパスになった（コメントや使われない関数ではバイナリが変わらない）。CA の early cutoff で、その derivation はビルドされない。
@@ -653,7 +655,9 @@ dynamic derivation と builder RPC（`builder-rpc-v0`）を実際の規模で試
       | altnix-cli にコメントを追加 | 129.8 s | 11.5 s（2） |
       | altnix-store にコメントを追加 | 126.1 s | 27.6 s（4） |
       | altnix-heap に関数を追加 | 133.2 s | 28.6 s（4） |
-      | altnix-compat にコメントを追加 | 130.9 s | 180.0 s（116） |
+      | altnix-compat にコメントを追加 | 130.9 s | 87.4 s（8：cargo-dyn、planner、altnix-compat とそれに依存する 4 つ、バイナリ） |
+
+      altnix-compat の行は、単位の builder を `cargo-dyn-task` に分けた後の値（分ける前は 180.0 s、116 個）。87.4 s のうち約 40 s は planner（`cargo-dyn`、fat LTO）自身のビルド。
 
       代わりに評価が遅くなる。`scripts/perf-check` の命令数は `release` に比べて 4〜16% 多い（`bench/modules` +16.3%、`bench/strings` +9.7%、`bench/calls` +5.7%、`bench/packages` +5.3%、nixpkgs の `firefox.drvPath` +3.9%）。開発中の反復には `nolto`、配布には `release`、という使い分けになる。
 
